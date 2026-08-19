@@ -61,6 +61,40 @@ label { font-size: 12px; color: #86909c; display: block; margin: 8px 0 4px; }
 .fc .opts li { margin: 2px 0; line-height: 1.5; }
 .fc .exp { margin-top: 6px; color: #00a870; font-size: 13px; }
 
+/* ---- 点击式复习（参考 AI 题库小程序） ---- */
+.fc-review { background: #fff; border: 1px solid #e5e6eb; border-radius: 12px; padding: 16px; }
+.fc-progress { height: 6px; background: #eef0f3; border-radius: 4px; overflow: hidden; margin-bottom: 12px; }
+.fc-progress-bar { height: 100%; background: #165dff; border-radius: 4px; transition: width .25s; }
+.fc-review-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.fc-progress-text { font-size: 13px; color: #4e5969; }
+.fc-q { font-size: 16px; font-weight: 600; line-height: 1.6; margin-bottom: 14px; }
+.fc-opts { display: flex; flex-direction: column; gap: 10px; }
+.fc-opt {
+  display: flex; align-items: flex-start; gap: 10px;
+  border: 2px solid #e5e6eb; border-radius: 10px; padding: 12px 14px;
+  font-size: 14px; line-height: 1.5; background: #fff; transition: all .15s;
+}
+.fc-opt-label { font-weight: 700; flex: 0 0 auto; }
+.fc-opt-content { flex: 1; }
+.fc-opt-icon { font-weight: 700; flex: 0 0 auto; }
+.fc-opt-click { cursor: pointer; }
+.fc-opt-click:hover { border-color: #165dff; }
+.fc-opt.fc-sel { border-color: #7b5cff; background: #f3effe; }
+.fc-opt.fc-correct { border-color: #00a870; background: #e8f8f0; color: #00875a; }
+.fc-opt.fc-wrong { border-color: #f53f3f; background: #feecec; color: #cb2634; }
+.fc-opt.fc-dim { border-color: #f0f1f3; color: #b0b4bd; }
+.fc-exp { margin-top: 14px; padding: 12px 14px; background: #eef9f4; border: 1px solid #c9eede; border-radius: 10px; color: #00875a; font-size: 13px; }
+.fc-confirm, .fc-nav { margin-top: 16px; }
+.fc-nav { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.fc-jumps { display: flex; flex-wrap: wrap; gap: 5px; justify-content: center; flex: 1; }
+.fc-jump {
+  width: 30px; height: 30px; border-radius: 8px; border: 1px solid #e5e6eb;
+  background: #f7f8fa; color: #4e5969; font-size: 12px; cursor: pointer;
+}
+.fc-jump-cur { background: #165dff; color: #fff; border-color: #165dff; }
+.fc-jump-done { background: #e8f8f0; color: #00875a; border-color: #b6e8cf; }
+.fc-jump:hover { opacity: .85; }
+
 /* 进度条/阶段 */
 .stage { font-size: 12px; color: #86909c; }
 

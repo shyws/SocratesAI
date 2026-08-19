@@ -225,9 +225,16 @@ window.Store = (function () {
         id: uid('fc_'), question: c.question || '', type, options: optsArr,
         correctKey, correctKeys, answer: correctText || rawAnswer,
         explanation: c.explanation || '', box: 1, due: new Date(now).toISOString(),
+        favorite: false,
       };
     });
     course.flashcards.push(...list); save(); return list;
+  }
+  // 切换闪卡收藏状态（参考 AI 题库小程序的收藏功能）
+  function toggleFlashcardFavorite(tbId, courseId, cardId) {
+    const course = findCourse(tbId, courseId); if (!course) throw new Error('课程不存在');
+    const fc = course.flashcards.find((f) => f.id === cardId); if (!fc) throw new Error('闪卡不存在');
+    fc.favorite = !fc.favorite; save(); return fc;
   }
   function updateFlashcard(tbId, courseId, cardId, patch) {
     const course = findCourse(tbId, courseId); if (!course) throw new Error('课程不存在');
@@ -325,7 +332,7 @@ window.Store = (function () {
     createTextbook, updateTextbook, deleteTextbook,
     setPrep, getPrep, updatePrep, cancelPrep, getCurrentWindow, setProgressWindow, advanceProgress,
     createCourse, appendDialogue, setSummary, saveCourse, getActiveCourse, clearActiveCourse, deleteCourse,
-    addFlashcards, updateFlashcard, deleteFlashcard, reviewFlashcard, dueByTextbook,
+    addFlashcards, updateFlashcard, deleteFlashcard, toggleFlashcardFavorite, reviewFlashcard, dueByTextbook,
     exportAll, previewImport, commitImport,
     // 暴露给 UI 的辅助
     _raw: load,

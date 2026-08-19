@@ -661,12 +661,19 @@ async function renderReview(tbId, courseId) {
         <div class="a">正确答案：${esc(correctLabel)} ｜ ${esc(f.answer)}</div>
         ${f.explanation ? `<div class="exp">解析：${renderMD(f.explanation)}</div>` : ''}
         <div class="box">box ${f.box || 1} ｜ 下次 ${new Date(f.due).toLocaleDateString()}</div>
-        <div class="row" style="margin-top:6px"><button class="ghost del" data-id="${f.id}">删除</button></div>
+        <div class="row" style="margin-top:6px">
+          <button class="ghost fav" data-id="${f.id}">${f.favorite ? '★ 已收藏' : '☆ 收藏'}</button>
+          <button class="ghost del" data-id="${f.id}">删除</button>
+        </div>
       </div>`;
     }).join('');
     $all('.del', box).forEach((b) => b.onclick = async () => {
       Store.deleteFlashcard(tbId, courseId, b.dataset.id);
       course.flashcards = Store.getState().textbooks.find((t) => t.id === tbId).courses.find((c) => c.id === courseId).flashcards;
+      renderFc();
+    });
+    $all('.fav', box).forEach((b) => b.onclick = () => {
+      Store.toggleFlashcardFavorite(tbId, courseId, b.dataset.id);
       renderFc();
     });
   };
@@ -691,35 +698,110 @@ async function renderReview(tbId, courseId) {
     finally { $('#gen-fc').disabled = false; }
   };
 
-  $('#review-mode').onclick = async () => {
-    const due = course.flashcards.filter((f) => new Date(f.due).getTime() <= Date.now());
-    if (!due.length) return alert('当前没有待复习的闪卡 🎉');
-    let i = 0;
-    const next = () => {
-      if (i >= due.length) { alert('本轮复习完成'); return renderReview(tbId, courseId); }
-      const f = due[i];
-      const box = $('#fc-list');
-      const opts = (Array.isArray(f.options) && f.options.length)
-        ? `<ol class="opts">${f.options.map((o) => `<li>${esc(o)}</li>`).join('')}</ol>` : '';
-      box.innerHTML = `<div class="fc"><div class="q">Q：${esc(f.question)}</div>
-        ${opts}
-        <div class="a" id="rv-a" style="display:none">正确答案：${esc(f.correctKey || '')} ｜ ${esc(f.answer)}</div>
-        ${f.explanation ? `<div class="exp" id="rv-e" style="display:none">解析：${renderMD(f.explanation)}</div>` : ''}
-        <div class="box">box ${f.box || 1}</div>
-        <div class="row" style="margin-top:8px">
-          <button id="rv-show">显示答案</button>
-          <button id="rv-bad" class="ghost" style="display:none">答错了</button>
-          <button id="rv-good" class="ghost" style="display:none">答对了</button>
-        </div></div>`;
-      $('#rv-show').onclick = () => {
-        $('#rv-a').style.display = 'block';
-        const e = document.getElementById('rv-e'); if (e) e.style.display = 'block';
-        $('#rv-bad').style.display = ''; $('#rv-good').style.display = '';
+  $('#review-mode').onclick = () => {
+    const all = course.flashcards;
+    if (!all.length) return alert('还没有闪卡，请先点「生成/重生成闪卡」');
+    // 复习状态：全部闪卡连续可练；已作答计入进度（参考 AI 题库小程序的点击式交互）
+    const rs = { tbId, courseId, cards: all.slice(), index: 0, answered: {}, multi: {} };
+    const getCard = () => rs.cards[rs.index];
+
+    function renderCard() {
+      const f = getCard();
+      if (!f) return;
+      const total = rs.cards.length;
+      const answeredCount = Object.keys(rs.answered).length;
+      const pct = Math.round(answeredCount / total * 100);
+      const opts = (Array.isArray(f.options) ? f.options : []).map((o) => {
+        const m = String(o).match(/^\s*([A-Da-d])\s*[.、)．]?\s*([\s\S]*)$/);
+        return { label: m ? m[1].toUpperCase() : '', content: m ? m[2].trim() : String(o) };
+      });
+      const correctSet = f.type === 'multiple'
+        ? new Set((f.correctKeys || []).map((k) => String(k).toUpperCase()))
+        : new Set([String(f.correctKey || '').toUpperCase()]);
+      const userAns = rs.answered[f.id];
+      const hasAnswered = userAns !== undefined;
+      const tempSel = rs.multi[f.id] || [];
+
+      const optCls = (o) => {
+        const isSel = f.type === 'multiple' ? tempSel.includes(o.label) : (userAns === o.label);
+        const isCorrect = correctSet.has(o.label);
+        if (hasAnswered) {
+          if (isCorrect) return 'fc-opt fc-correct';
+          if (isSel && !isCorrect) return 'fc-opt fc-wrong';
+          return 'fc-opt fc-dim';
+        }
+        if (isSel) return 'fc-opt fc-sel';
+        return 'fc-opt fc-click';
       };
-      $('#rv-good').onclick = async () => { Store.reviewFlashcard(tbId, courseId, f.id, 2); i++; next(); };
-      $('#rv-bad').onclick = async () => { Store.reviewFlashcard(tbId, courseId, f.id, 1); i++; next(); };
-    };
-    next();
+
+      const optsHtml = opts.map((o) => `<div class="${optCls(o)}" data-label="${o.label}">
+        <span class="fc-opt-label">${o.label}</span>
+        <span class="fc-opt-content">${esc(o.content)}</span>
+        ${hasAnswered && correctSet.has(o.label) ? '<span class="fc-opt-icon">✓</span>' : ''}
+        ${hasAnswered && (f.type === 'multiple' ? tempSel.includes(o.label) : userAns === o.label) && !correctSet.has(o.label) ? '<span class="fc-opt-icon">✗</span>' : ''}
+      </div>`).join('');
+
+      const jumpHtml = rs.cards.map((c, i) => `<button class="fc-jump ${i === rs.index ? 'fc-jump-cur' : (rs.answered[c.id] !== undefined ? 'fc-jump-done' : '')}" data-idx="${i}">${i + 1}</button>`).join('');
+      const expHtml = hasAnswered && f.explanation ? `<div class="fc-exp">📝 解析：${renderMD(f.explanation)}</div>` : '';
+      const box = $('#fc-list');
+      box.innerHTML = `<div class="fc-review">
+        <div class="fc-progress"><div class="fc-progress-bar" style="width:${pct}%"></div></div>
+        <div class="fc-review-top">
+          <span class="fc-progress-text">第 ${rs.index + 1} / ${total} 题 · 已答 ${answeredCount}</span>
+          <span class="pill">${f.type === 'multiple' ? '多选题' : '单选题'}</span>
+          <button class="ghost fc-fav" data-id="${f.id}">${f.favorite ? '★ 已收藏' : '☆ 收藏'}</button>
+          <button class="ghost fc-exit">退出复习</button>
+        </div>
+        <div class="fc-q">${esc(f.question)}</div>
+        <div class="fc-opts">${optsHtml}</div>
+        ${expHtml}
+        ${f.type === 'multiple' && !hasAnswered ? `<button class="primary fc-confirm">✓ 确认答案（已选 ${tempSel.length} 个）</button>` : ''}
+        <div class="fc-nav">
+          <button class="ghost fc-prev" ${rs.index === 0 ? 'disabled' : ''}>← 上一题</button>
+          <div class="fc-jumps">${jumpHtml}</div>
+          <button class="primary fc-next" ${rs.index === total - 1 ? 'disabled' : ''}>下一题 →</button>
+        </div>
+      </div>`;
+
+      $all('.fc-opt', box).forEach((el) => el.onclick = () => {
+        const label = el.dataset.label;
+        if (f.type === 'multiple') {
+          if (rs.answered[f.id] !== undefined) return;
+          const arr = rs.multi[f.id] || [];
+          const i = arr.indexOf(label);
+          if (i >= 0) arr.splice(i, 1); else arr.push(label);
+          rs.multi[f.id] = arr;
+          renderCard();
+        } else {
+          if (rs.answered[f.id] !== undefined) return;
+          const correct = label === String(f.correctKey || '').toUpperCase();
+          rs.answered[f.id] = label;
+          Store.reviewFlashcard(tbId, courseId, f.id, correct ? 2 : 1);
+          renderCard();
+        }
+      });
+      const confirmBtn = $('.fc-confirm', box);
+      if (confirmBtn) confirmBtn.onclick = () => {
+        const arr = rs.multi[f.id] || [];
+        if (!arr.length) { alert('请至少选择一个选项'); return; }
+        const correctSet2 = new Set((f.correctKeys || []).map((k) => String(k).toUpperCase()).sort());
+        const userSet2 = new Set(arr.slice().sort().map((k) => k.toUpperCase()));
+        const correct = correctSet2.size === userSet2.size && [...correctSet2].every((k) => userSet2.has(k));
+        rs.answered[f.id] = arr.slice().sort().join(',');
+        Store.reviewFlashcard(tbId, courseId, f.id, correct ? 2 : 1);
+        renderCard();
+      };
+      $('.fc-prev', box).onclick = () => { if (rs.index > 0) { rs.index--; renderCard(); } };
+      $('.fc-next', box).onclick = () => { if (rs.index < total - 1) { rs.index++; renderCard(); } };
+      $all('.fc-jump', box).forEach((b) => b.onclick = () => { rs.index = parseInt(b.dataset.idx, 10); renderCard(); });
+      $('.fc-fav', box).onclick = () => {
+        Store.toggleFlashcardFavorite(tbId, courseId, f.id);
+        f.favorite = !f.favorite;
+        renderCard();
+      };
+      $('.fc-exit', box).onclick = () => { renderReview(tbId, courseId); };
+    }
+    renderCard();
   };
 
   $('#exp-md').onclick = () => download(course.title + '.md', buildExportMD(course, tb), 'text/markdown');
@@ -786,11 +868,11 @@ async function renderSettings() {
     <div class="row" style="margin-top:8px"><button id="gp-save">保存全局人设</button><span class="muted">每教材可在教材页覆盖</span></div>
   </div>
   <div class="card">
-    <h3>自带 AI API（BYO）</h3>
-    <p class="muted" style="margin:4px 0 10px">${hasKey ? '已配置你自己的 Key（点击下方按钮可查看 / 修改）。' : '默认走内置演示模式；想让 Socratopia 用你自有的 LLM Key，请点下方按钮填入。'}</p>
+    <h3>DeepSeek API Key</h3>
+    <p class="muted" style="margin:4px 0 10px">本应用使用 DeepSeek 生成备课 / 对话 / 闪卡，<strong>只需填入你自己的 Key</strong>；Base URL 与模型已内置（deepseek-chat），无需手填。${hasKey ? '已配置（点击可查看 / 修改）。' : '未配置时自动进入演示模式。'}<span style="margin-left:6px;color:#2a6df4;cursor:pointer" onclick="openByoModal(Store.getApiConfigRaw()||{})">📖 如何获取 Key？</span></p>
     <div class="row">
-      <button id="open-byo" class="primary">${hasKey ? '查看 / 修改 API Key' : '用自己的 API Key'}</button>
-      <span class="muted" id="byo-summary">${hasKey ? `当前：${esc(cfg.provider || '?')} · ${esc(cfg.model || '(默认模型)')}` : '未配置'}</span>
+      <button id="open-byo" class="primary">${hasKey ? '查看 / 修改 API Key' : '填入 API Key'}</button>
+      <span class="muted" id="byo-summary">${hasKey ? '当前：DeepSeek · deepseek-chat' : '未配置'}</span>
     </div>
   </div>
   <div class="card">
@@ -840,45 +922,69 @@ function openByoModal(cfg) {
   const overlay = document.createElement('div');
   overlay.className = 'modal-mask';
   overlay.innerHTML = `
-    <div class="modal">
-      <div class="modal-title">用自己的 API Key</div>
-      <div class="modal-sub">🔒 Key 仅存于本浏览器 localStorage，不经任何服务器、不进仓库，可随时清除。生产级隐私：数据完全在你自己设备上。</div>
-      <label>Provider</label>
-      <select id="mp-provider">
-        <option value="deepseek" ${c.provider==='deepseek'?'selected':''}>DeepSeek</option>
-        <option value="partner" ${c.provider==='partner'?'selected':''}>伙伴计划</option>
-        <option value="kimi" ${c.provider==='kimi'?'selected':''}>Kimi</option>
-        <option value="qwen" ${c.provider==='qwen'?'selected':''}>Qwen</option>
-        <option value="custom" ${c.provider==='custom'?'selected':''}>自定义 OpenAI 兼容</option>
-      </select>
-      <label>Base URL</label><input id="mp-base" placeholder="https://.../v1" value="${esc(c.baseURL || '')}" />
-      <label>API Key</label><input id="mp-key" type="password" placeholder="sk-..." value="${esc(c.apiKey || '')}" />
-      <label>Model</label><input id="mp-model" placeholder="模型名" value="${esc(c.model || '')}" />
-      <div class="row" style="margin-top:14px">
+    <div class="modal" style="max-width:520px">
+      <div class="modal-title">🔑 DeepSeek API Key</div>
+      <div class="modal-sub">🔒 Key 仅存于本浏览器 localStorage，不经任何服务器、不进仓库，可随时清除。模型已内置为 <strong>DeepSeek · deepseek-chat</strong>，你只需填 Key。</div>
+      <label>API Key</label>
+      <div style="position:relative">
+        <input id="mp-key" type="password" placeholder="sk-..." value="${esc(c.apiKey || '')}" style="width:100%;padding-right:44px" />
+        <button type="button" id="mp-toggle" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);border:none;background:transparent;cursor:pointer;color:#888;font-size:16px">👁️</button>
+      </div>
+      <div class="row" style="margin-top:14px;flex-wrap:wrap;gap:8px">
         <button class="ghost" id="mp-cancel">取消</button>
         <button class="primary" id="mp-save">保存并使用</button>
+        <button class="ghost" id="mp-test">🔍 测试连接</button>
+        <button class="ghost" id="mp-clear">清除</button>
         <span class="muted" id="mp-msg"></span>
+      </div>
+      <div class="modal-sub" style="margin-top:18px;line-height:1.75;border-top:1px solid #eee;padding-top:14px">
+        <strong>📖 如何获取 DeepSeek API Key？</strong><br>
+        1. 访问 <a href="https://platform.deepseek.com" target="_blank" rel="noopener" style="color:#2a6df4">https://platform.deepseek.com</a> 注册 / 登录<br>
+        2. 左侧菜单「API keys」→ 点「创建 API key」<br>
+        3. 复制生成的 <code>sk-...</code> 粘贴到上方输入框<br>
+        4. DeepSeek 新用户通常赠送额度，足够大量生成备课 / 闪卡<br>
+        <span style="color:#c0392b">⚠️ 请勿分享 Key，也不要在公开场合截图。如泄露，请立即到 DeepSeek 控制台删除并重新生成。</span>
       </div>
     </div>`;
   document.body.appendChild(overlay);
   overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  const msg = $('#mp-msg', overlay);
   $('#mp-cancel', overlay).onclick = () => overlay.remove();
-  $('#mp-save', overlay).onclick = async () => {
+  $('#mp-toggle', overlay).onclick = () => {
+    const inp = $('#mp-key', overlay);
+    inp.type = inp.type === 'password' ? 'text' : 'password';
+  };
+  $('#mp-clear', overlay).onclick = () => {
+    Store.updateApiConfig({ provider: 'deepseek', baseURL: '', apiKey: '', model: '' });
+    $('#mp-key', overlay).value = '';
+    msg.textContent = '已清除';
+    const btn = $('#open-byo'); if (btn) btn.textContent = '填入 API Key';
+    const sum = $('#byo-summary'); if (sum) sum.textContent = '未配置';
+  };
+  $('#mp-test', overlay).onclick = async () => {
+    const key = $('#mp-key', overlay).value.trim();
+    if (key.length < 20) { msg.innerHTML = '<span style="color:#c0392b">Key 太短，请检查</span>'; return; }
+    msg.textContent = '测试中…';
     try {
-      Store.updateApiConfig({
-        provider: $('#mp-provider', overlay).value,
-        baseURL: $('#mp-base', overlay).value,
-        apiKey: $('#mp-key', overlay).value,
-        model: $('#mp-model', overlay).value,
-      });
-      $('#mp-msg', overlay).textContent = '已保存（对话将使用你的 Key）';
-      const summary = $('#byo-summary');
-      if (summary) summary.textContent = `当前：${$('#mp-provider', overlay).value} · ${$('#mp-model', overlay).value || '(默认模型)'}`;
+      const r = await window.LLM.chat([{ role: 'user', content: 'ping' }], { max_tokens: 8 }, { provider: 'deepseek', baseURL: '', apiKey: key, model: '' });
+      if (r && r.content != null) msg.innerHTML = '<span style="color:#2a9d4a">✓ 连接成功</span>';
+      else throw new Error('空响应');
+    } catch (e) { msg.innerHTML = '<span style="color:#c0392b">连接失败：' + esc(e.message || e) + '</span>'; }
+  };
+  $('#mp-save', overlay).onclick = async () => {
+    const rawKey = $('#mp-key', overlay).value.trim();
+    if (!rawKey) { msg.innerHTML = '<span style="color:#c0392b">请粘贴你的 DeepSeek API Key</span>'; return; }
+    if (rawKey.length < 20) { msg.innerHTML = '<span style="color:#c0392b">Key 格式似乎不对（通常以 sk- 开头，长度 ≥ 20）</span>'; return; }
+    try {
+      Store.updateApiConfig({ provider: 'deepseek', baseURL: '', apiKey: rawKey, model: '' });
+      msg.textContent = '已保存（对话将使用你的 Key）';
+      const sum = $('#byo-summary');
+      if (sum) sum.textContent = '当前：DeepSeek · deepseek-chat';
       const btn = $('#open-byo');
-      if (btn && $('#mp-key', overlay).value) btn.textContent = '查看 / 修改 API Key';
+      if (btn) btn.textContent = '查看 / 修改 API Key';
       setTimeout(() => overlay.remove(), 600);
     } catch (e) {
-      $('#mp-msg', overlay).textContent = '保存失败：' + (e.message || e);
+      msg.textContent = '保存失败：' + (e.message || e);
     }
   };
 }
