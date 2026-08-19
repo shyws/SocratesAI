@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>苏格拉底AI教学·学习工作台</title>
+  <link rel="stylesheet" href="styles.css" />
+  <!-- 截图式 PDF 导出（html2pdf.js：jsPDF + html2canvas）。离线时 PDF 按钮自动禁用 -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+  <!-- PDF 文字提取（按需懒加载，离线时上传 PDF 会提示改用粘贴） -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <!-- Markdown 渲染：marked 解析 + DOMPurify 净化（本地化，离线可用；内容来自 AI/用户输入须防 XSS） -->
+  <script src="vendor/marked.min.js"></script>
+  <script src="vendor/purify.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">苏格拉底AI教学<span class="brand-sub">学习工作台</span></div>
+    <nav class="nav" id="nav">
+      <a href="#/" data-route="/">仪表盘</a>
+      <a href="#/textbooks" data-route="/textbooks">教材库</a>
+      <a href="#/settings" data-route="/settings">设置</a>
+    </nav>
+  </header>
+
+  <main id="app" class="app"><div class="loading">加载中…</div></main>
+
+  <!-- 前端模块（无打包、全局挂载）：提示词 → 直连 LLM → 存储 → 引擎 → 主程序 -->
+  <script src="prompts.js"></script>
+  <script src="llm.js"></script>
+  <script src="store.js"></script>
+  <script src="engine.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
