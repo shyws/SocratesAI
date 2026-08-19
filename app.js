@@ -837,23 +837,146 @@ function buildExportAnki(course) {
   }).join('\n');
 }
 
+/**
+ * 截图式 PDF 导出（html2pdf = jsPDF + html2canvas）。
+ * 关键修复（解决"灰色横条覆盖文字"）：
+ *   1) 内嵌完整 PDF 样式表，不依赖父级 styles.css，避免截图样式丢失/错位
+ *   2) 固定 wrap 宽度（760px ≈ A4 内文宽度），关掉响应式布局引起的拉伸
+ *   3) 每个对话行/闪卡项加 page-break-inside: avoid，强制不在内容中间切
+ *   4) 屏幕外渲染容器，避免页面闪烁
+ *   5) 保留 legacy 自动切片作为兜底
+ */
 function exportPDF(course, tbTitle) {
   if (!window.html2pdf) return alert('PDF 组件未加载（需联网加载 html2pdf.js），请改用 MD 导出。');
   const esc2 = (s) => esc(s).replace(/\n/g, '<br>');
-  let body = `<h2>${esc(course.title)}</h2><div>教材：${esc(tbTitle)} ｜ 状态：${course.status}</div><h3>对话记录</h3>`;
-  course.dialogues.forEach((d) => { body += `<div><b>${d.role === 'user' ? '学员' : '苏格拉底'}</b>：${renderMD(d.content)}</div>`; });
+
+  // 内嵌样式表：保证截图环境与 SPA 一致；块级元素带 page-break-inside: avoid
+  const pdfCss = `
+    <style>
+      .pdf-root {
+        font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "SimHei", "Hiragino Sans GB", sans-serif;
+        color: #1f2329; line-height: 1.7; font-size: 14px;
+      }
+      .pdf-root h2 { font-size: 22px; margin: 4px 0 8px; font-weight: 700; }
+      .pdf-root h3 {
+        font-size: 16px; margin: 20px 0 10px;
+        border-bottom: 2px solid #2b6cff; padding-bottom: 4px;
+        page-break-after: avoid; break-after: avoid;
+      }
+      .pdf-meta { color: #86909c; font-size: 13px; margin-bottom: 12px; }
+      .dlg-list { margin: 0; padding: 0; }
+      .dlg-row {
+        page-break-inside: avoid; break-inside: avoid;
+        margin: 0 0 10px; padding: 8px 12px;
+        border: 1px solid #eef0f3; border-radius: 8px;
+        background: #fafbfc;
+      }
+      .dlg-row.user { background: #eaf1ff; border-color: #c7d8ff; }
+      .dlg-who { font-size: 12px; color: #2b6cff; font-weight: 600; margin-bottom: 4px; }
+      .dlg-row.user .dlg-who { color: #165dff; }
+      .dlg-body { font-size: 14px; line-height: 1.7; word-wrap: break-word; }
+      .dlg-body p { margin: 4px 0; }
+      /* Markdown 内块级元素：避免带背景色块跨页被切成"灰条" */
+      .pdf-root .md p { margin: 4px 0; }
+      .pdf-root .md code { background: #f2f3f5; padding: 1px 5px; border-radius: 4px; font-size: .92em; }
+      .pdf-root .md pre { background: #f2f3f5; color: #1f2329; padding: 10px 12px; border-radius: 8px; white-space: pre-wrap; margin: 6px 0; }
+      .pdf-root .md blockquote { border-left: 3px solid #d0d3d9; padding: 4px 12px; color: #555; background: #fafbfc; margin: 6px 0; }
+      .pdf-root .md th, .pdf-root .md td { border: 1px solid #e5e6eb; padding: 4px 8px; font-size: 13px; }
+      .pdf-root .md th { background: #f2f3f5; }
+      .sum-block { padding: 8px 12px; background: #f5f8ff; border-left: 3px solid #2b6cff; border-radius: 4px; margin: 6px 0; }
+      .sum-block b { color: #1f2329; }
+      .fc-list { padding-left: 22px; margin: 6px 0; }
+      .fc-row {
+        page-break-inside: avoid; break-inside: avoid;
+        margin: 0 0 12px; padding: 10px 12px;
+        border: 1px solid #e5e6eb; border-radius: 8px;
+        background: #ffffff;
+      }
+      .fc-q { font-weight: 600; margin: 0 0 6px; line-height: 1.6; }
+      .fc-opts { padding-left: 18px; margin: 4px 0 6px; line-height: 1.6; }
+      .fc-opt { line-height: 1.6; margin: 1px 0; }
+      .fc-a { color: #00875a; line-height: 1.6; margin-top: 4px; }
+      .fc-exp { background: #eef9f4; color: #00875a; padding: 8px 12px; border-radius: 6px; margin-top: 6px; font-size: 13px; line-height: 1.6; }
+    </style>
+  `;
+
+  // 内容组装
+  let body = `<div class="pdf-root">`;
+  body += `<h2>${esc(course.title)}</h2>`;
+  body += `<div class="pdf-meta">教材：《${esc(tbTitle)}》 ｜ 状态：${esc(course.status)} ｜ 共 ${course.dialogues.length} 轮对话 ｜ ${course.flashcards.length} 张闪卡</div>`;
+
+  // 一、对话记录
+  body += `<h3>一、对话记录</h3><div class="dlg-list">`;
+  course.dialogues.forEach((d) => {
+    const isUser = d.role === 'user';
+    body += `<div class="dlg-row${isUser ? ' user' : ''}">`;
+    body += `<div class="dlg-who">${isUser ? '学员' : '苏格拉底'}</div>`;
+    body += `<div class="dlg-body">${renderMD(d.content)}</div>`;
+    body += `</div>`;
+  });
+  body += `</div>`;
+
+  // 二、课后总结
   if (course.summary) {
-    body += `<h3>课后总结</h3><p>已掌握：${course.summary.mastered.map(esc).join('、')}</p><p>薄弱：${course.summary.weak.map(esc).join('、')}</p><p>下一步：${course.summary.nextSteps.map(esc).join('；')}</p>`;
+    body += `<h3>二、课后总结</h3>`;
+    if (course.summary.mastered && course.summary.mastered.length) {
+      body += `<div class="sum-block"><b>已掌握：</b>${course.summary.mastered.map(esc).join('、')}</div>`;
+    }
+    if (course.summary.weak && course.summary.weak.length) {
+      body += `<div class="sum-block"><b>薄弱：</b>${course.summary.weak.map(esc).join('、')}</div>`;
+    }
+    if (course.summary.nextSteps && course.summary.nextSteps.length) {
+      body += `<div class="sum-block"><b>下一步：</b>${course.summary.nextSteps.map(esc).join('；')}</div>`;
+    }
+    if (course.summary.keyPoints && course.summary.keyPoints.length) {
+      body += `<div class="sum-block"><b>关键点：</b>${course.summary.keyPoints.map(esc).join('；')}</div>`;
+    }
   }
+
+  // 三、闪卡
   if (course.flashcards.length) {
-    body += `<h3>闪卡</h3><ol>` + course.flashcards.map((f) => `<li><b>Q:</b> ${esc2(f.question)} <br><b>A:</b> ${esc2(f.answer)}</li>`).join('') + `</ol>`;
+    body += `<h3>三、闪卡（${course.flashcards.length}）</h3><ol class="fc-list">`;
+    course.flashcards.forEach((f, i) => {
+      body += `<li class="fc-row">`;
+      body += `<div class="fc-q">${i + 1}. <b>Q:</b> ${esc2(f.question)}</div>`;
+      if (Array.isArray(f.options) && f.options.length) {
+        body += `<div class="fc-opts">${f.options.map((o) => `<div class="fc-opt">${esc2(o)}</div>`).join('')}</div>`;
+      }
+      const correct = f.type === 'multiple' && Array.isArray(f.correctKeys) ? f.correctKeys.join(',') : (f.correctKey || '');
+      if (correct) {
+        body += `<div class="fc-a"><b>正确答案：</b>${esc(correct)}</div>`;
+      }
+      body += `<div class="fc-a"><b>A:</b> ${esc2(f.answer)}</div>`;
+      if (f.explanation) body += `<div class="fc-exp"><b>解析：</b>${esc2(f.explanation)}</div>`;
+      body += `</li>`;
+    });
+    body += `</ol>`;
   }
+  body += `</div>`;
+
+  // 容器：固定宽度 + 屏幕外渲染，避免页面闪烁和响应式布局影响
   const wrap = document.createElement('div');
-  wrap.style.padding = '24px'; wrap.style.background = '#fff';
-  wrap.innerHTML = body;
+  wrap.className = 'pdf-wrap';
+  wrap.style.cssText = 'position:fixed;top:0;left:-99999px;width:760px;background:#fff;color:#1f2329;padding:24px 28px;box-sizing:border-box;z-index:-1;';
+  wrap.innerHTML = pdfCss + body;
   document.body.appendChild(wrap);
-  window.html2pdf().set({ margin: 10, filename: course.title + '.pdf', html2canvas: { scale: 2 }, jsPDF: { unit: 'mm', format: 'a4' } })
-    .from(wrap).save().then(() => wrap.remove());
+
+  // 给出图片写入完成的稳定回调再清理 wrap
+  window.html2pdf().set({
+    margin: [12, 12, 14, 12],
+    filename: (course.title || '课程') + '.pdf',
+    image: { type: 'jpeg', quality: 0.95 },
+    html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff', windowWidth: 760 },
+    jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait', compress: true },
+    // mode: css → 优先按 CSS page-break-* 切页；legacy → 兜底按高度自动切
+    pagebreak: { mode: ['css', 'legacy'], avoid: ['.dlg-row', '.fc-row', '.sum-block', '.pdf-root h3'] }
+  }).from(wrap).save().then(() => {
+    try { document.body.removeChild(wrap); } catch (_) {}
+  }).catch((err) => {
+    try { document.body.removeChild(wrap); } catch (_) {}
+    console.error('PDF export failed:', err);
+    alert('PDF 导出失败：' + (err && err.message ? err.message : err) + '\n请改用 MD 导出。');
+  });
 }
 
 /* ----------------- 设置（全局人设 + BYO API + 数据备份） ----------------- */
