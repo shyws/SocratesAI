@@ -98,12 +98,15 @@ ${ctx}输出严格的 JSON（不要任何解释文字、不要 markdown 代码�
 - pendingQuestion 只保留问题本身，不要舞台提示、参考注脚、斜体旁白。`;
   }
 
-  function buildFlashcardSystem({ currentWindow = null } = {}) {
+  function buildFlashcardSystem({ currentWindow = null, targetCount = 10 } = {}) {
     let ctx = '';
     if (currentWindow) {
       ctx += `【本节课窗口】\n覆盖教材片段 ${currentWindow.startChunk}~${currentWindow.endChunk}`;
       if (currentWindow.title) ctx += `（${currentWindow.title}）`;
       ctx += `\n${(currentWindow.summary || '').slice(0, 800)}\n\n`;
+      if (Array.isArray(currentWindow.knowledgePoints) && currentWindow.knowledgePoints.length) {
+        ctx += `【本窗口知识点（${currentWindow.knowledgePoints.length} 个）】\n${currentWindow.knowledgePoints.join('、')}\n\n`;
+      }
     }
     return `${TASK_FLASHCARDS}
 你是复习题（闪卡）生成助手。请基于【本节课窗口】的教材内容与师生对话，为【学科知识本身】生成选择题复习卡。
@@ -112,8 +115,8 @@ ${ctx}严格遵守：
 - 只考教材 / 学科知识点；禁止涉及教学者人设、角色扮演、学员情绪，以及对话中的表情 / 动作描写（如 *斜体旁白*、〔舞台提示〕）。
 - 单选题：四个互斥选项，只有一个正确，answer 为单个字母（如 "B"）。
 - 多选题（不定项）：四个选项，有 2~4 个正确，answer 用逗号连接正确项字母（如 "A,C,D"）。多选题占比约 30%，单选题约 70%。
-- 数量：基于窗口知识点生成，**至少 10 道，不设上限**，尽量覆盖本窗口核心知识点。
-- 严格输出 JSON 数组（不要任何解释文字、不要 markdown 代码块），每项结构：
+- **本次必须生成恰好 ${targetCount} 道**（${targetCount} 道题数已由系统按本窗口知识点数确定，不要多也不要少）；尽量覆盖本窗口核心知识点，每个知识点至少对应一道。
+- 严格输出 JSON 数组（不要任何解释文字、不要 markdown 代码块，不要包裹在对象里，直接是数组），每项结构：
   { "type":"single" | "multiple", "question":"题干", "options":["A. ...","B. ...","C. ...","D. ..."], "answer":"B" 或 "A,C,D", "explanation":"解析：为什么正确、其余为何错误" }
 - 题干、选项与解析都用教材事实，不编造；干扰项要有明显学科依据，不能胡编。`;
   }

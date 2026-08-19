@@ -21,7 +21,16 @@ window.Engine = (function () {
     return scored.slice(0, topK).map((x) => x.c);
   }
 
-  function parseJSON(text) {
+  // 若解析结果是对象且启用 unwrapArray，则提取其中首个数组字段（兼容 {flashcards:[...]} 等包裹形式）
+  function unwrapIfNeeded(obj, opts) {
+    if (Array.isArray(obj)) return obj;
+    if (opts && opts.unwrapArray && obj && typeof obj === 'object') {
+      const arr = Object.keys(obj).reduce((acc, k) => acc || (Array.isArray(obj[k]) ? obj[k] : null), null);
+      if (arr) return arr;
+    }
+    return obj;
+  }
+  function parseJSON(text, opts) {
     if (typeof text !== 'string') return null;
     let t = text.trim();
     const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -36,8 +45,22 @@ window.Engine = (function () {
       if (inStr) { if (esc) esc = false; else if (ch === '\\') esc = true; else if (ch === '"') inStr = false; }
       else if (ch === '"') inStr = true;
       else if (ch === openCh) depth++;
-      else if (ch === closeCh) { depth--; if (depth === 0) { try { return JSON.parse(t.slice(openIdx, i + 1)); } catch (e) { return null; } } }
+      else if (ch === closeCh) {
+        depth--;
+        if (depth === 0) {
+          const slice = t.slice(openIdx, i + 1);
+          return tryParseJSON(slice, opts);
+        }
+      }
     }
+    return null;
+  }
+  // 先直接解析；失败则做容错清洗（尾随逗号）后重试。
+  // 注意：不替换中文引号——中文引号常作为题目文本内容出现，盲目替换会破坏合法 JSON。
+  function tryParseJSON(raw, opts) {
+    try { return unwrapIfNeeded(JSON.parse(raw), opts); } catch (e) { /* 继续尝试清洗 */ }
+    let s = raw.replace(/,(\s*[}\]])/g, '$1').replace(/，(\s*[}\]])/g, '$1'); // 移除尾随逗号（半角/全角）
+    try { return unwrapIfNeeded(JSON.parse(s), opts); } catch (e) { /* 仍失败 */ }
     return null;
   }
 
@@ -266,18 +289,26 @@ window.Engine = (function () {
     if (!course) throw new Error('课程不存在');
     const currentWindow = course.currentWindow || Store.getCurrentWindow(tb);
     const windowCtx = enrichWindow(currentWindow, tb);
+    // 目标题数：下限 10 道；按本窗口知识点数适当增加（覆盖更多知识点）；上限 20 防止超出模型产出质量
+    const kpCount = (windowCtx && Array.isArray(windowCtx.knowledgePoints)) ? windowCtx.knowledgePoints.length : 0;
+    const targetCount = Math.min(20, Math.max(10, kpCount));
     const cleanedDialogues = (course.dialogues || []).map((d) => ({ role: d.role, content: cleanForReview(d.content || '') }));
     const messages = [
-      { role: 'system', content: P.buildFlashcardSystem({ currentWindow: windowCtx }) },
+      { role: 'system', content: P.buildFlashcardSystem({ currentWindow: windowCtx, targetCount }) },
       ...cleanedDialogues,
     ];
     if (course.summary) messages.push({ role: 'assistant', content: '本次总结：' + JSON.stringify(course.summary) });
-    const { content, provider } = await callLLM(messages, { task: 'flashcards', temperature: 0.4, max_tokens: 3000 });
+    const { content, provider } = await callLLM(messages, { task: 'flashcards', temperature: 0.4, max_tokens: 8192 });
     let cards = [];
-    if (provider !== 'mock') cards = parseJSON(content) || [];
-    if (!Array.isArray(cards) || !cards.length) cards = mockFlashcards(course.dialogues);
+    if (provider !== 'mock') {
+      cards = parseJSON(content, { unwrapArray: true }) || [];
+      if (!Array.isArray(cards) || !cards.length) {
+        console.warn('[Engine] 闪卡：API 已调用但响应解析失败（可能截断/格式异常），降级 mock。provider=', provider);
+      }
+    }
+    if (!Array.isArray(cards) || !cards.length) cards = mockFlashcards(course.dialogues, targetCount);
     const added = Store.addFlashcards(textbookId, courseId, cards, { replace: true });
-    return { flashcards: added, provider };
+    return { flashcards: added, provider, targetCount };
   }
 
   async function endCourse(textbookId, courseId) {
@@ -308,7 +339,8 @@ window.Engine = (function () {
       text: `（演示模式 · 未接入真实模型）本节课共 ${turns} 轮师生对话，学员在引导下尝试独立思考。接入真实 API 后将生成个性化总结。`,
     };
   }
-  function mockFlashcards(dialogues) {
+  function mockFlashcards(dialogues, targetCount) {
+    const count = Math.max(10, targetCount || 10);
     const turns = (dialogues || []).filter((d) => d.role === 'assistant');
     const templates = [
       { opts: ['A. 该说法与教材无关', 'B. 该结论可由教材片段直接推出', 'C. 这是纯主观感受，无对错', 'D. 应忽略教材自行判断'], ans: 'B', exp: '复习卡只考学科知识点；正确项须基于教材片段推导，不凭空发挥。' },
@@ -317,11 +349,9 @@ window.Engine = (function () {
       { opts: ['A. 直接背结论', 'B. 先理解前提再推导', 'C. 跳过例子', 'D. 只记公式'], ans: 'B', exp: '苏格拉底式学习强调从前提推导，而非记忆结论。' },
     ];
     const cards = []; let i = 0;
-    while (cards.length < 10) {
-      const t = turns[i % Math.max(turns.length, 1)];
-      const q = t ? String(t.content || '').replace(/\n+/g, ' ').slice(0, 36) : '本节课的核心知识点';
+    while (cards.length < count) {
       const tmpl = templates[cards.length % templates.length];
-      cards.push({ question: `关于"${q}…"，以下说法正确的是？`, options: tmpl.opts, answer: tmpl.ans, explanation: tmpl.exp });
+      cards.push({ question: '关于本节课的核心知识点，以下说法正确的是？', options: tmpl.opts, answer: tmpl.ans, explanation: tmpl.exp });
       i++;
     }
     return cards;
