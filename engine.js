@@ -104,7 +104,10 @@ window.Engine = (function () {
     const cfg = Store.getApiConfigRaw();
     if (!opts.forceMock && cfg && cfg.apiKey && cfg.apiKey.trim()) {
       try { return await LLM.chat(messages, opts, cfg); }
-      catch (e) { console.warn('[Engine] BYO 调用失败，降级 mock：', e.message); }
+      catch (e) {
+        console.warn('[Engine] BYO 调用失败，降级 mock：', e.message);
+        if (opts.failLoud) throw e; // 部分任务要求失败必须可见，不再静默兜底
+      }
     }
     return { content: mockByTask(opts.task, messages), provider: 'mock' };
   }
@@ -282,31 +285,51 @@ window.Engine = (function () {
     return { summary: saved, provider };
   }
 
-  async function extractFlashcards(textbookId, courseId) {
+  async function extractFlashcards(textbookId, courseId, opts = {}) {
     const s = Store._raw();
     const tb = s.textbooks.find((t) => t.id === textbookId);
     const course = tb && tb.courses.find((c) => c.id === courseId);
     if (!course) throw new Error('课程不存在');
+
+    // 演示模式：用户明确同意使用 mock 闪卡（用于无 Key 或调试场景）
+    if (opts.forceMock) {
+      const targetCount = Math.min(20, Math.max(10, opts.targetCount || 10));
+      const cards = mockFlashcards(course.dialogues, targetCount);
+      const added = Store.addFlashcards(textbookId, courseId, cards, { replace: true });
+      return { flashcards: added, provider: 'mock', targetCount };
+    }
+
+    const cfg = Store.getApiConfigRaw();
+    if (!cfg || !cfg.apiKey || !cfg.apiKey.trim()) {
+      throw new Error('未配置 API Key，无法生成真实闪卡。请先在「设置」页填写 DeepSeek API Key，或勾选「使用演示闪卡」。');
+    }
+
     const currentWindow = course.currentWindow || Store.getCurrentWindow(tb);
     const windowCtx = enrichWindow(currentWindow, tb);
     // 目标题数：下限 10 道；按本窗口知识点数适当增加（覆盖更多知识点）；上限 20 防止超出模型产出质量
     const kpCount = (windowCtx && Array.isArray(windowCtx.knowledgePoints)) ? windowCtx.knowledgePoints.length : 0;
-    const targetCount = Math.min(20, Math.max(10, kpCount));
-    const cleanedDialogues = (course.dialogues || []).map((d) => ({ role: d.role, content: cleanForReview(d.content || '') }));
+    const targetCount = Math.min(20, Math.max(10, opts.targetCount || kpCount));
+    // 限制送审对话长度：只取最近 24 轮，避免上下文/token 超限导致 JSON 截断
+    const recentDialogues = (course.dialogues || []).slice(-24);
+    const cleanedDialogues = recentDialogues.map((d) => ({ role: d.role, content: cleanForReview(d.content || '') }));
     const messages = [
       { role: 'system', content: P.buildFlashcardSystem({ currentWindow: windowCtx, targetCount }) },
       ...cleanedDialogues,
     ];
     if (course.summary) messages.push({ role: 'assistant', content: '本次总结：' + JSON.stringify(course.summary) });
-    const { content, provider } = await callLLM(messages, { task: 'flashcards', temperature: 0.4, max_tokens: 8192 });
-    let cards = [];
-    if (provider !== 'mock') {
-      cards = parseJSON(content, { unwrapArray: true }) || [];
-      if (!Array.isArray(cards) || !cards.length) {
-        console.warn('[Engine] 闪卡：API 已调用但响应解析失败（可能截断/格式异常），降级 mock。provider=', provider);
-      }
+
+    const { content, provider } = await callLLM(messages, { task: 'flashcards', temperature: 0.4, max_tokens: 8192, failLoud: true });
+
+    if (provider === 'mock') {
+      throw new Error('未配置 API Key 或 API 调用失败，无法生成真实闪卡。请检查「设置」中的 API Key，或选择「使用演示闪卡」。');
     }
-    if (!Array.isArray(cards) || !cards.length) cards = mockFlashcards(course.dialogues, targetCount);
+
+    let cards = parseJSON(content, { unwrapArray: true });
+    if (!Array.isArray(cards) || !cards.length) {
+      const preview = String(content || '').replace(/\s+/g, ' ').slice(0, 300);
+      console.warn('[Engine] 闪卡解析失败，原始响应前 300 字：', preview);
+      throw new Error(`AI 返回的闪卡无法解析为合法 JSON 数组（可能截断或格式异常）。响应片段：${preview || '（空）'}`);
+    }
     const added = Store.addFlashcards(textbookId, courseId, cards, { replace: true });
     return { flashcards: added, provider, targetCount };
   }
@@ -318,11 +341,22 @@ window.Engine = (function () {
     if (!course) throw new Error('课程不存在');
     const fallbackPending = cleanPending(course.lastQuestion || '');
     const { summary } = await summarize(textbookId, courseId);
-    const { flashcards } = await extractFlashcards(textbookId, courseId);
+    // 闪卡失败不应阻止下课保存进度；记录错误供前端提示用户手动重试
+    let flashcards = course.flashcards || [];
+    let flashcardError = '';
+    let flashcardProvider = '';
+    try {
+      const r = await extractFlashcards(textbookId, courseId);
+      flashcards = r.flashcards;
+      flashcardProvider = r.provider;
+    } catch (e) {
+      flashcardError = e.message;
+      console.warn('[Engine] 下课时闪卡生成失败，课程仍会结束：', e.message);
+    }
     const pendingQuestion = cleanPending(summary.pendingQuestion || fallbackPending || '');
     const saved = Store.saveCourse(textbookId, courseId, { pendingQuestion, status: 'ended', endedAt: new Date().toISOString() });
     Store.advanceProgress(textbookId);
-    return { summary: saved.summary, flashcards: saved.flashcards, pendingQuestion, courseId };
+    return { summary: saved.summary, flashcards: saved.flashcards, pendingQuestion, courseId, flashcardError, flashcardProvider };
   }
 
   function reviewFlashcard(tbId, courseId, fcId, quality) { return Store.reviewFlashcard(tbId, courseId, fcId, quality); }

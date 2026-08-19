@@ -593,8 +593,11 @@ async function renderLesson(tbId, courseId) {
       if (!confirm('下课并自动生成课后总结与闪卡？')) return;
       const btn = $('#finish'); btn.disabled = true;
       try {
-        await Engine.endCourse(tbId, courseId);
+        const r = await Engine.endCourse(tbId, courseId);
         renderLesson(tbId, courseId);
+        if (r.flashcardError) {
+          alert('课程已结束，但闪卡生成失败：' + r.flashcardError + '\n\n请到总结页点击「生成/重生成闪卡」手动重试。');
+        }
       } catch (e) { alert('下课失败：' + e.message); btn.disabled = false; }
     };
   }
@@ -647,8 +650,12 @@ async function renderReview(tbId, courseId) {
 
   const renderFc = () => {
     const box = $('#fc-list');
-    if (!course.flashcards.length) { box.innerHTML = `<div class="muted">还没有闪卡，点"生成闪卡"。</div>`; return; }
-    box.innerHTML = course.flashcards.map((f) => {
+  if (!course.flashcards.length) { box.innerHTML = `<div class="muted">还没有闪卡，点"生成闪卡"。</div>`; return; }
+  // 显示闪卡来源，帮助用户区分真实 AI 生成与演示模板
+  const providerHint = course.flashcards.some((f) => f.question && f.question.includes('关于本节课的核心知识点'))
+    ? '<div class="muted" style="margin-bottom:8px">⚠️ 当前为演示模板闪卡（非 AI 生成）。若已配置 API Key，请点击「生成/重生成闪卡」重新生成。</div>'
+    : '';
+  box.innerHTML = providerHint + course.flashcards.map((f) => {
       const opts = (Array.isArray(f.options) && f.options.length)
         ? `<ol class="opts">${f.options.map((o) => `<li>${esc(o)}</li>`).join('')}</ol>` : '';
       const typeLabel = f.type === 'multiple' ? '不定项' : '单选';
@@ -694,7 +701,18 @@ async function renderReview(tbId, courseId) {
       course.flashcards = Store.getState().textbooks.find((t) => t.id === tbId).courses.find((c) => c.id === courseId).flashcards;
       renderFc();
       alert('已覆盖生成 ' + r.flashcards.length + ' 张闪卡（旧的已替换）');
-    } catch (e) { alert('失败：' + e.message); }
+    } catch (e) {
+      // 无 Key / API 失败 / 解析失败时，给用户明确反馈并提供演示闪卡兜底
+      const wantMock = confirm('生成真实闪卡失败：' + e.message + '\n\n是否改用「演示闪卡」（模板题，非 AI 生成）？');
+      if (wantMock) {
+        try {
+          const r = await Engine.extractFlashcards(tbId, courseId, { forceMock: true });
+          course.flashcards = Store.getState().textbooks.find((t) => t.id === tbId).courses.find((c) => c.id === courseId).flashcards;
+          renderFc();
+          alert('已生成 ' + r.flashcards.length + ' 张演示闪卡（模板题）。');
+        } catch (e2) { alert('演示闪卡也失败：' + e2.message); }
+      }
+    }
     finally { $('#gen-fc').disabled = false; }
   };
 
