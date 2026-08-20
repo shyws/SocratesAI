@@ -1075,6 +1075,7 @@ async function renderSettings() {
   const rawCfg = Store.getApiConfigRaw();
   const cfg = state.learner.apiConfig || {};
   const hasKey = !!(rawCfg && rawCfg.apiKey);
+  const ragMode = (rawCfg && rawCfg.ragMode) || 'vector';
   let html = `<h2>设置</h2>
   <div class="card"><h3>全局默认教学者人设</h3>
     <textarea id="gp" placeholder="如：语气温和、善于用生活类比的引导者；可留空">${esc(state.learner.globalPersona || '')}</textarea>
@@ -1087,6 +1088,17 @@ async function renderSettings() {
       <button id="open-byo" class="primary">${hasKey ? '查看 / 修改 API Key' : '填入 API Key'}</button>
       <span class="muted" id="byo-summary">${hasKey ? '当前：DeepSeek · deepseek-chat' : '未配置'}</span>
     </div>
+  </div>
+  <div class="card">
+    <h3>教材检索模式（RAG）</h3>
+    <p class="muted" style="margin:4px 0 10px">决定每轮对话如何从教材中检索相关片段注入。
+    <strong>向量(RAG)</strong>：本地 bge 模型做语义检索，中文更准（首次需从镜像下载约 130MB 模型，之后浏览器缓存）；
+    <strong>词频</strong>：零下载的中文 n-gram 检索，速度最快。若向量模型加载失败会自动回退到词频。</p>
+    <div class="row" style="gap:18px">
+      <label><input type="radio" name="rag" value="vector" ${(ragMode === 'lexical') ? '' : 'checked'}/> 向量(RAG) 语义检索</label>
+      <label><input type="radio" name="rag" value="lexical" ${ragMode === 'lexical' ? 'checked' : ''}/> 词频 快速检索</label>
+    </div>
+    <div class="muted" id="rag-msg" style="margin-top:8px"></div>
   </div>
   <div class="card">
     <h3>数据备份（全部用户数据，不含 API Key）</h3>
@@ -1102,6 +1114,7 @@ async function renderSettings() {
   app().innerHTML = html;
   $('#gp-save').onclick = async () => { Store.updateGlobalPersona($('#gp').value); alert('已保存'); };
   $('#open-byo').onclick = () => openByoModal(rawCfg || {});
+  document.querySelectorAll('input[name=rag]').forEach((el) => { el.onchange = () => { if (el.checked) { Store.setRagMode(el.value); const m = $('#rag-msg'); if (m) m.textContent = '检索模式已设为：' + (el.value === 'lexical' ? '词频' : '向量(RAG)'); } }; });
   $('#export-all').onclick = () => {
     const data = Store.exportAll();
     download('socratopia-backup-' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify(data, null, 2), 'application/json');

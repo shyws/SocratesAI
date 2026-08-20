@@ -8,17 +8,127 @@ window.Engine = (function () {
   const LLM = window.LLM;
   const MAX_PREP_CHUNKS = 120;
 
-  /* ---- 工具 ---- */
-  function retrieve(chunks, query, topK = 3) {
-    if (!chunks || !chunks.length) return [];
+  /* ---- 教材 RAG：向量语义检索（transformers.js 本地 bge）+ 中文词频回退 ---- */
+  const EMBED_MODEL = 'Xenova/bge-small-zh-v1.5';
+  const BGE_QUERY_PREFIX = 'Represent this sentence for searching relevant passages: ';
+  let _tfMod = null, _extractor = null, _embedBroken = false;
+
+  function getRagMode() {
+    const cfg = Store.getApiConfigRaw();
+    if (!cfg || !cfg.apiKey) return 'lexical'; // 演示 / 无 Key 模式不加载向量模型，直接走词频
+    return (cfg && cfg.ragMode) || 'vector'; // 'vector' | 'lexical'
+  }
+
+  async function ensureExtractor() {
+    if (_extractor) return _extractor;
+    if (_embedBroken) return null;
+    try {
+      const mod = await import(/* @vite-ignore */ 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2');
+      try { mod.env.allowLocalModels = false; } catch (e) {}
+      try { mod.env.HF_HUB_URL = 'https://hf-mirror.com'; } catch (e) {} // 国内镜像，避免 huggingface.co 直连失败
+      _extractor = await mod.pipeline('feature-extraction', EMBED_MODEL, { dtype: 'q8' });
+      _tfMod = mod;
+      console.info('[Engine] 本地向量模型已加载：' + EMBED_MODEL);
+      return _extractor;
+    } catch (e) {
+      console.warn('[Engine] 本地向量模型加载失败，回退中文词频检索：', e && e.message);
+      _embedBroken = true;
+      return null;
+    }
+  }
+
+  // 批量生成句向量（已归一化）；失败返回 null
+  async function embedTexts(texts) {
+    if (!texts || !texts.length) return null;
+    const ex = await ensureExtractor();
+    if (!ex) return null;
+    try {
+      const out = await ex(texts, { pooling: 'mean', normalize: true });
+      const dim = out.dims[out.dims.length - 1];
+      const data = out.data; // Float32Array，长度 = n*dim
+      const vecs = [];
+      for (let i = 0; i < texts.length; i++) vecs.push(Array.from(data.subarray(i * dim, (i + 1) * dim)));
+      return { dim, vecs };
+    } catch (e) {
+      console.warn('[Engine] 向量推理失败，回退中文词频检索：', e && e.message);
+      _embedBroken = true;
+      return null;
+    }
+  }
+
+  // 确保教材 [start,end] 区间内所有 chunk 已向量化（增量缓存到 Store）
+  async function ensureEmbeddings(tb, start, end) {
+    const cfg = Store.getApiConfigRaw();
+    if (!cfg || !cfg.apiKey) return null; // 演示 / 无 Key 模式不加载向量模型
+    if (!tb) return null;
+    let emb = (tb.embeddings && tb.embeddings.model === EMBED_MODEL) ? tb.embeddings : null;
+    if (!emb || emb.n !== tb.chunks.length) emb = { dim: 0, vecs: [], model: EMBED_MODEL, n: tb.chunks.length };
+    const missing = [];
+    for (let i = start; i <= end && i < tb.chunks.length; i++) {
+      if (!emb.vecs[i] || emb.vecs[i].length === 0) missing.push(i);
+    }
+    if (missing.length) {
+      const res = await embedTexts(missing.map((i) => tb.chunks[i].text || ''));
+      if (!res) return null;
+      if (!emb.dim) emb.dim = res.dim;
+      for (let k = 0; k < missing.length; k++) emb.vecs[missing[k]] = res.vecs[k];
+      try { Store.setEmbeddings(tb.id, emb); } catch (e) { console.warn('[Engine] 向量持久化失败（可能超 localStorage 上限），本次会话仅内存缓存：', e.message); }
+    }
+    return emb;
+  }
+
+  function cosine(a, b) {
+    let s = 0; const n = Math.min(a.length, b.length);
+    for (let i = 0; i < n; i++) s += a[i] * b[i];
+    return s; // 已归一化 → 点积即余弦
+  }
+
+  // 中文友好的词频 / 字符 n-gram 回退检索（向量不可用时的兜底，仍基于窗口 top-k）
+  function tokenize(text) {
+    const t = (text || '').toLowerCase();
+    const grams = [];
+    const cn = t.match(/[\u4e00-\u9fff]/g);
+    if (cn && cn.length >= 2) { for (let i = 0; i < cn.length - 1; i++) grams.push(cn[i] + cn[i + 1]); }
+    else if (cn) { grams.push.apply(grams, cn); }
+    const en = t.match(/[a-z0-9]+/g);
+    if (en) grams.push.apply(grams, en);
+    return grams.length ? grams : [t];
+  }
+  function lexicalRetrieve(chunks, query, topK) {
+    const grams = tokenize(query);
     const q = (query || '').toLowerCase();
-    const words = q.split(/\s+/).filter(Boolean);
     const scored = chunks.map((c) => {
       const cl = c.toLowerCase(); let s = 0;
-      for (const w of words) if (cl.includes(w)) s += 1;
+      for (const g of grams) if (cl.includes(g)) s += 1;
+      if (cl.includes(q)) s += 2;
       return { c, s };
-    }).sort((a, b) => b.s - a.s);
+    });
+    scored.sort((a, b) => b.s - a.s);
     return scored.slice(0, topK).map((x) => x.c);
+  }
+
+  // RAG 检索：在教材窗口 [opts.start, opts.end] 内取与 query 最相关的 topK 片段。
+  // opts.tb 提供全局 chunk 以便复用向量缓存。向量失败自动回退词频。
+  async function retrieve(chunks, query, topK = 3, opts = {}) {
+    if (!chunks || !chunks.length) return [];
+    const useWindow = opts.tb && opts.start != null && opts.end != null;
+    const cand = useWindow ? chunks.slice(opts.start, opts.end + 1) : chunks;
+    if (getRagMode() === 'vector' && useWindow) {
+      const emb = await ensureEmbeddings(opts.tb, opts.start, opts.end);
+      if (emb && emb.dim) {
+        const q = await embedTexts([BGE_QUERY_PREFIX + query]);
+        if (q && q.vecs[0]) {
+          const qv = q.vecs[0];
+          const scored = [];
+          for (let i = opts.start; i <= opts.end && i < chunks.length; i++) {
+            if (emb.vecs[i]) scored.push({ c: chunks[i], s: cosine(qv, emb.vecs[i]) });
+          }
+          scored.sort((a, b) => b.s - a.s);
+          return scored.slice(0, topK).map((x) => x.c);
+        }
+      }
+    }
+    return lexicalRetrieve(cand, query, topK);
   }
 
   // 若解析结果是对象且启用 unwrapArray，则提取其中首个数组字段（兼容 {flashcards:[...]} 等包裹形式）
@@ -201,12 +311,18 @@ window.Engine = (function () {
     const progress = tb ? tb.progress : null;
     const tbHasImages = !!(tb && tb.hasImages);
     const currentWindow = (course && course.currentWindow) || (tb ? Store.getCurrentWindow(tb) : null);
-    let chunks = tb ? tb.chunks.map((c) => c.text) : [];
-    if (currentWindow && currentWindow.startChunk != null && currentWindow.endChunk != null) chunks = chunks.slice(currentWindow.startChunk, currentWindow.endChunk + 1);
-    const anchor = retrieve(chunks, message, 3);
-    const system = P.buildSystemPrompt({ personaText, progress, textbookChunks: anchor, textbookHasImages: tbHasImages });
+    const allChunks = tb ? tb.chunks.map((c) => c.text) : [];
+    let win = null;
+    if (currentWindow && currentWindow.startChunk != null && currentWindow.endChunk != null) win = { start: currentWindow.startChunk, end: currentWindow.endChunk };
+    // RAG 检索：在教材窗口 [start,end] 内取与问题最相关的 top-3 片段（向量优先，失败自动回退词频）
+    const anchor = await retrieve(allChunks, message, 3, { tb, start: win ? win.start : 0, end: win ? win.end : Math.max(0, allChunks.length - 1) });
+    // 稳定系统提示（规则+人设+进度+媒介）放最前 → DeepSeek/OpenAI 前缀缓存命中（1/10 价）
+    const stableSystem = P.buildSystemPrompt({ personaText, progress, textbookHasImages: tbHasImages });
+    const messages = [{ role: 'system', content: stableSystem }];
+    const anchorText = P.buildAnchorPrompt(anchor);
+    if (anchorText) messages.push({ role: 'system', content: anchorText });
     const history = course ? course.dialogues.slice(-8) : [];
-    const messages = [{ role: 'system', content: system }, ...history, { role: 'user', content: message }];
+    messages.push(...history, { role: 'user', content: message });
     const { content: reply, provider } = await callLLM(messages, { task: 'chat', max_tokens: 1500, forceMock: !!forceMock });
     if (course) {
       Store.appendDialogue(textbookId, course.id, { role: 'user', content: message, provider });
@@ -245,6 +361,10 @@ window.Engine = (function () {
         ? '请基于以上教材（含上次遗留问题与本节课窗口）开始本节课：先回顾遗留问题，再把它变成今天的第一个引导性问题，并确保问题落在本节课窗口内。'
         : '请基于以上教材与本节课窗口开始本节课：先说目标（建立认知地图），再从窗口内抛出第一个引导性问题。' },
     ];
+    // 预载当前窗口向量（与开场生成并行，不阻塞）；失败自动回退词频
+    if (currentWindow && currentWindow.startChunk != null && currentWindow.endChunk != null) {
+      ensureEmbeddings(tb, currentWindow.startChunk, currentWindow.endChunk).catch((e) => console.warn('[Engine] 预载向量失败：', e && e.message));
+    }
     const { content: reply, provider } = await callLLM(messages, { task: 'lesson', max_tokens: 1500, forceMock: !!forceMock });
     Store.appendDialogue(textbookId, course.id, { role: 'assistant', content: reply, provider });
     Store.saveCourse(textbookId, course.id, { currentWindow: windowCtx });

@@ -22,6 +22,7 @@ window.Store = (function () {
     }, tb.progress || {});
     if (tb.prep === undefined) tb.prep = null;
     if (!Array.isArray(tb.courses)) tb.courses = [];
+    tb.embeddings = null; // 向量不随备份迁移，导入后由引擎按需重新生成
     return tb;
   }
 
@@ -75,6 +76,19 @@ window.Store = (function () {
   function updateApiConfig(cfg) { const s = load(); s.learner.apiConfig = cfg || null; save(); return s.learner.apiConfig; }
   function updateGlobalPersona(text) { const s = load(); s.learner.globalPersona = text || ''; save(); return s.learner; }
 
+  /* ---------------- 向量缓存 + 检索模式 ---------------- */
+  function getEmbeddings(tbId) { const tb = findTextbook(tbId); return tb ? tb.embeddings : null; }
+  function setEmbeddings(tbId, emb) {
+    const tb = findTextbook(tbId); if (!tb) throw new Error('教材不存在');
+    tb.embeddings = emb; save(); return tb.embeddings;
+  }
+  function setRagMode(mode) {
+    const s = load();
+    const cfg = Object.assign({}, s.learner.apiConfig || {});
+    cfg.ragMode = (mode === 'lexical') ? 'lexical' : 'vector';
+    s.learner.apiConfig = cfg; save(); return cfg;
+  }
+
   /* ---------------- 教材 ---------------- */
   function findTextbook(tbId) { return load().textbooks.find((t) => t.id === tbId); }
   function createTextbook({ title, text, personaOverride }) {
@@ -90,7 +104,7 @@ window.Store = (function () {
     const tb = findTextbook(tbId); if (!tb) throw new Error('教材不存在');
     if (patch.title != null) tb.title = patch.title;
     if (patch.personaOverride != null) tb.personaOverride = patch.personaOverride;
-    if (patch.text != null) tb.chunks = sliceText(patch.text);
+    if (patch.text != null) { tb.chunks = sliceText(patch.text); tb.embeddings = null; }
     save(); return tb;
   }
   function deleteTextbook(tbId) {
@@ -280,7 +294,7 @@ window.Store = (function () {
         globalPersona: s.learner.globalPersona || '',
         preferences: s.learner.preferences || '',
       },
-      textbooks: s.textbooks,
+      textbooks: (s.textbooks || []).map((t) => { const c = Object.assign({}, t); delete c.embeddings; return c; }),
     };
   }
 
@@ -333,6 +347,7 @@ window.Store = (function () {
     setPrep, getPrep, updatePrep, cancelPrep, getCurrentWindow, setProgressWindow, advanceProgress,
     createCourse, appendDialogue, setSummary, saveCourse, getActiveCourse, clearActiveCourse, deleteCourse,
     addFlashcards, updateFlashcard, deleteFlashcard, toggleFlashcardFavorite, reviewFlashcard, dueByTextbook,
+    getEmbeddings, setEmbeddings, setRagMode,
     exportAll, previewImport, commitImport,
     // 暴露给 UI 的辅助
     _raw: load,

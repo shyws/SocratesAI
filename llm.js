@@ -27,6 +27,14 @@ window.LLM = (function () {
       temperature: opts && opts.temperature != null ? opts.temperature : 0.7,
       max_tokens: opts && opts.max_tokens != null ? opts.max_tokens : 1200,
     };
+    // Prompt 缓存（省 token）：
+    // - DeepSeek / OpenAI：前缀缓存默认开启，只需「稳定系统提示在最前且各轮不变」（Engine.chat 已做到），无需标记。
+    // - Anthropic 兼容端点：若用户在设置中开启 cacheControl，则在 system 末段加 cache_control 标记。
+    if (apiConfig.cacheControl && /anthropic/i.test(apiConfig.provider || '')) {
+      body.messages = messages.map((m) => m.role === 'system'
+        ? { role: 'system', content: [{ type: 'text', text: m.content, cache_control: { type: 'ephemeral' } }] }
+        : m);
+    }
     const resp = await fetch(url, {
       method: 'POST',
       headers: {

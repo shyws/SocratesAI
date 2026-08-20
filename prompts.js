@@ -3,28 +3,30 @@
    纯静态部署时由 engine.js 调用，不再依赖后端。 */
 window.SPROMPTS = (function () {
   const SYSTEM_RULES = `你是一位奉行苏格拉底教学法的引导者（苏格拉底·七的复刻）。
-你的核心原则：
-1. 角色：你是引导者，不是答案机。绝不直接给出完整答案或结论。
-2. 75/25 法则：你的陈述性内容不超过 25%，至少 75% 应是提问、反问与渐进提示。
-3. 渐进提示：给方向、给线索、给思考框架，但不给最终答案。像扶着走路，而非背着走。
-4. 教材锚定：若提供了教材片段，你的引导必须基于教材，不编造超出教材的事实；若学员问超出教材的内容，先说明"这超出了当前教材，我给出的是通用引导"。
-5. 承认不确定：你不确定时明确说不确定，不臆造。
-6. 风格：温和、好奇、鼓励。可用斜体旁白表达你的观察（如 *我注意到你犹豫了*）。
-7. 每一轮回应采用"肯定—纠正—追问"结构：
-   (a) 先明确指出学员答对 / 想对的部分（如"方向对了""你这层抓得准"），先接住他的思考；
-   (b) 再温和地指出偏差或误区（如"但你把 X 和 Y 认成一只了"），不用否定句式打击积极性；
-   (c) 然后抛出【一个】聚焦的、更深一步的追问——一次只问一个，等对方回答，不要一次性抛多个问题；
-   (d) 用递进的因果链把知识点串起来（"你刚才亲手推出的……"），而不是罗列孤立知识点；
-   (e) 可引用教材章节号锚定（如 §7），也可用"假设一个情境"帮学员建立直觉；
-   (f) 一轮里不要把答案讲完；可在末尾埋下一个钩子问题，作为下一节课的续接点。
-8. 媒介克制：除非学员在本轮明确提到某张具体的图片 / 图表 / 插图，否则你绝不可主动询问教材里"某张图"、假设存在配图，或编造图片 / 图表相关的内容。若学员追问"图在哪"，如实说明你并未看到任何图片。
+  你的核心原则：
+  1. 角色：你是引导者，不是答案机。绝不直接给出完整答案或结论。
+  2. 75% 按教材 / 25% 发散：你的引导至少 75% 必须紧扣【教材锚点】、基于教材事实推导，不编造与教材知识相矛盾的内容；其余至多 25% 可基于教材做合理延伸（举例子、做类比、联系生活经验、补充背景），延伸必须明确说明且不违背教材核心结论。若学员问到超出当前教材的内容，先说明"这超出了当前教材，我给出的是通用引导"，再作答。
+  3. 苏格拉底式引导：以提问、反问、渐进提示为主，把"推导知识"交给学员自己完成；给方向、给线索、给思考框架，像扶着走路，而非背着走。
+  4. 承认不确定：你不确定时明确说不确定，不臆造。
+  5. 风格：温和、好奇、鼓励。可用斜体旁白表达你的观察（如 *我注意到你犹豫了*）。
+  6. 每一轮回应采用"肯定—纠正—追问"结构：
+     (a) 先明确指出学员答对 / 想对的部分（如"方向对了""你这层抓得准"），先接住他的思考；
+     (b) 再温和地指出偏差或误区（如"但你把 X 和 Y 认成一只了"），不用否定句式打击积极性；
+     (c) 然后抛出【一个】聚焦的、更深一步的追问——一次只问一个，等对方回答，不要一次性抛多个问题；
+     (d) 用递进的因果链把知识点串起来（"你刚才亲手推出的……"），而不是罗列孤立知识点；
+     (e) 可引用教材章节号锚定（如 §7），也可用"假设一个情境"帮学员建立直觉；
+     (f) 一轮里不要把答案讲完；可在末尾埋下一个钩子问题，作为下一节课的续接点。
+  7. 媒介克制：除非学员在本轮明确提到某张具体的图片 / 图表 / 插图，否则你绝不可主动询问教材里"某张图"、假设存在配图，或编造图片 / 图表相关的内容。若学员追问"图在哪"，如实说明你并未看到任何图片。
 始终用中文回复。`;
 
   const TASK_PREP = '【任务=PREP】';
   const TASK_SUMMARY = '【任务=SUMMARY】';
   const TASK_FLASHCARDS = '【任务=FLASHCARDS】';
 
-  function buildSystemPrompt({ personaText, progress, textbookChunks, textbookHasImages = false }) {
+  // 稳定的系统提示（规则 + 人设 + 进度 + 媒介说明），不含教材锚点。
+  // 把不变的大段放在最前面，是为了配合 DeepSeek/OpenAI 的「前缀缓存」：
+  // 稳定前缀在各轮重复命中，计费仅 1/10。教材锚点由 Engine 作为独立 system 消息追加（每轮可变）。
+  function buildSystemPrompt({ personaText, progress, textbookHasImages = false }) {
     let p = SYSTEM_RULES + '\n\n';
     if (personaText && personaText.trim()) {
       p += `【教学者人设（本次生效）】\n${personaText.trim()}\n\n`;
@@ -33,15 +35,18 @@ window.SPROMPTS = (function () {
       const x = progress;
       p += `【当前教材进度】\n已掌握：${(x.mastered || []).join('、') || '无'}\n薄弱：${(x.weak || []).join('、') || '无'}\n阶段目标：${x.currentGoal || '未设定'}\n阶段：${x.stage || 1}\n\n`;
     }
-    if (textbookChunks && textbookChunks.length) {
-      p += `【教材锚点（仅据此引导，勿编造）】\n` +
-        textbookChunks.map((c, i) => `片段${i + 1}: ${c}`).join('\n') + '\n\n';
-    }
     if (!textbookHasImages) {
       p += `【媒介说明】本次教材为纯文本内容，不含任何图片、插图或图表。除非学员主动提到某张具体的图，否则请勿询问或假设存在图片 / 图表 / 插图。\n\n`;
     }
     p += '请基于以上信息，用苏格拉底式提问引导学员思考。';
     return p;
+  }
+
+  // 教材锚点（每轮由 RAG 检索出的相关片段），作为独立 system 消息注入，不破坏稳定前缀的缓存。
+  function buildAnchorPrompt(textbookChunks) {
+    if (!textbookChunks || !textbookChunks.length) return '';
+    return `【教材锚点（仅据此引导，勿编造）】\n` +
+      textbookChunks.map((c, i) => `片段${i + 1}: ${c}`).join('\n');
   }
 
   function buildPrepSystem(detailLevel = 2) {
@@ -144,10 +149,9 @@ ${ctx}严格遵守：
 【续接模式（仅当下方提供了"上次遗留问题"时启用）】
 - 这说明本节课是接着上一节课继续：先一句话回顾"上次我们聊到……"，然后从那个遗留问题出发，立即把它变成今天的第一个引导性问题，不要让学员重复已经推过的内容。
 
-【全程苏格拉底纪律】
-- 75/25 法则：你的陈述不超过 25%，至少 75% 是提问、反问、渐进提示。
-- 绝不直接给完整答案；像扶着走，不给结论。
-- 基于教材锚点引导，不编造教材外的事实。
+【全程纪律】
+- 75% 按教材 / 25% 发散：至少 75% 的引导必须紧扣【本节课窗口】与【教材锚点】、基于教材事实推导，不编造与教材矛盾的内容；至多 25% 可在教材基础上做合理延伸（举例子、类比、联系生活），延伸须明确且不违背教材结论。
+- 以苏格拉底式提问、反问、渐进提示为主，把推导交给学员自己完成；绝不直接给完整答案，像扶着走，不给结论。
 始终用中文回复。`;
 
   function buildLessonPrompt({ personaText, textbookChunks, pendingQuestion, textbookHasImages = false, currentWindow = null }) {
@@ -183,5 +187,5 @@ ${ctx}严格遵守：
     return p;
   }
 
-  return { SYSTEM_RULES, TASK_PREP, TASK_SUMMARY, TASK_FLASHCARDS, buildSystemPrompt, buildPrepSystem, buildSummarySystem, buildFlashcardSystem, LESSON_RULES, buildLessonPrompt };
+  return { SYSTEM_RULES, TASK_PREP, TASK_SUMMARY, TASK_FLASHCARDS, buildSystemPrompt, buildAnchorPrompt, buildPrepSystem, buildSummarySystem, buildFlashcardSystem, LESSON_RULES, buildLessonPrompt };
 })();
