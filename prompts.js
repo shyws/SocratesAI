@@ -101,21 +101,26 @@ ${ctx}输出严格的 JSON（不要任何解释文字、不要 markdown 代码�
   function buildFlashcardSystem({ currentWindow = null, targetCount = 10 } = {}) {
     let ctx = '';
     if (currentWindow) {
-      ctx += `【本节课窗口】\n覆盖教材片段 ${currentWindow.startChunk}~${currentWindow.endChunk}`;
+      ctx += `【本节课窗口（背景参考，非出题主体）】\n覆盖教材片段 ${currentWindow.startChunk}~${currentWindow.endChunk}`;
       if (currentWindow.title) ctx += `（${currentWindow.title}）`;
       ctx += `\n${(currentWindow.summary || '').slice(0, 800)}\n\n`;
       if (Array.isArray(currentWindow.knowledgePoints) && currentWindow.knowledgePoints.length) {
-        ctx += `【本窗口知识点（${currentWindow.knowledgePoints.length} 个）】\n${currentWindow.knowledgePoints.join('、')}\n\n`;
+        ctx += `【本窗口知识点（仅作补充参考，不要求逐条出题）】\n${currentWindow.knowledgePoints.join('、')}\n\n`;
       }
     }
     return `${TASK_FLASHCARDS}
-你是复习题（闪卡）生成助手。请基于【本节课窗口】的教材内容与师生对话，为【学科知识本身】生成选择题复习卡。
+你是复习题（闪卡）生成助手。请基于本节课的【师生对话】，为本节课实际涉及到的【学科知识本身】生成选择题复习卡。
+
+【核心原则：出题必须贴合本节课真实讨论，而非泛泛覆盖整本教材】
+- 首要依据：下方【师生对话】。优先针对对话中真实出现的、学员答错或薄弱的、以及老师重点讲解 / 反复追问的知识点出选择题。
+- 补充依据：仅当对话未充分覆盖本窗口、仍有明显空白时，才用【本节课窗口】知识点查漏补缺；不得为了"覆盖所有知识点"而编造与本次上课无关的题干。
+- 严禁出与本次上课主题无关的泛化题、教材全书的笼统题。
 ${ctx}严格遵守：
 - 只出选择题（单选或多选），严禁出填空题、判断题、简答题。
 - 只考教材 / 学科知识点；禁止涉及教学者人设、角色扮演、学员情绪，以及对话中的表情 / 动作描写（如 *斜体旁白*、〔舞台提示〕）。
 - 单选题：四个互斥选项，只有一个正确，answer 为单个字母（如 "B"）。
 - 多选题（不定项）：四个选项，有 2~4 个正确，answer 用逗号连接正确项字母（如 "A,C,D"）。多选题占比约 30%，单选题约 70%。
-- **本次必须生成 ${targetCount} 道题**（${targetCount} 道题数已由系统按本窗口知识点数确定；允许少 1~2 道，但不要超过 ${targetCount} 道）；尽量覆盖本窗口核心知识点，每个知识点至少对应一道。
+- **本次最多生成 ${targetCount} 道题**（允许少 1~2 道，不要超过 ${targetCount} 道；宁可少而精，确保每道题都对应本节课真实讲到的内容，以对话实际覆盖为准）。
 - 严格输出 JSON 数组（不要任何解释文字、不要 markdown 代码块，不要包裹在对象里，直接是数组）。确保 JSON 合法：字符串内的双引号必须转义为 \\"，选项与题干中不要出现未转义的换行符。
 - 每项结构：
   { "type":"single" | "multiple", "question":"题干", "options":["A. ...","B. ...","C. ...","D. ..."], "answer":"B" 或 "A,C,D", "explanation":"解析：为什么正确、其余为何错误" }

@@ -61,6 +61,35 @@ function loadScript(src) {
   });
 }
 
+/* 长任务遮罩：下课生成"总结 + 闪卡"期间锁定页面并提示，防止用户中途关闭导致结果丢失、token 浪费 */
+let _busyLeaveHandler = null;
+function setBusy(on, text) {
+  let mask = document.getElementById('socratopia-busy');
+  if (on) {
+    if (!mask) {
+      mask = document.createElement('div');
+      mask.id = 'socratopia-busy';
+      mask.className = 'modal-mask';
+      mask.innerHTML = `<div class="modal" style="text-align:center;max-width:440px">
+        <div class="modal-title">⏳ 正在生成，请稍候</div>
+        <div class="modal-sub" id="socratopia-busy-text" style="color:#4e5969">${esc(text || '')}</div>
+        <div class="busy-spinner"></div>
+      </div>`;
+      document.body.appendChild(mask);
+    }
+    const t = document.getElementById('socratopia-busy-text');
+    if (t) t.textContent = text || '';
+    if (!_busyLeaveHandler) {
+      // 关闭/刷新页面时给出二次确认，避免误退出导致已发起的 LLM 调用结果丢失
+      _busyLeaveHandler = (e) => { e.preventDefault(); e.returnValue = ''; return ''; };
+      window.addEventListener('beforeunload', _busyLeaveHandler);
+    }
+  } else {
+    if (mask) mask.remove();
+    if (_busyLeaveHandler) { window.removeEventListener('beforeunload', _busyLeaveHandler); _busyLeaveHandler = null; }
+  }
+}
+
 /* 浏览器端提取 PDF 文字（pdf.js） */
 async function extractPdfText(file) {
   if (!window.pdfjsLib) {
@@ -224,18 +253,33 @@ function renderProgressGrid(tb, compact) {
   const covered = tb.progress && tb.progress.coveredUnitIndices ? tb.progress.coveredUnitIndices : [];
   const win = tb.progress && tb.progress.currentWindow ? tb.progress.currentWindow : null;
   const cells = compact ? 30 : 100;
-  let html = `<div class="progress-grid ${compact ? 'compact' : ''}" title="每个小格约代表全书 ${Math.round(100 / cells)}%。主题色实格：此前范围；空心格：当前窗口；浅色实格：后续范围">`;
+  // 退化情形：当前窗口覆盖整本（所有单元已覆盖 / 未备课回退），此时不应让全部格子都显示"当前"空心框
+  const winIsFullBook = win && win.startChunk <= 0 && win.endChunk >= (n - 1);
+  let html = `<div class="progress-grid ${compact ? 'compact' : ''}" title="每个小格约代表全书 ${Math.round(100 / cells)}%。实格：已学完；空心框：正在学；浅色：后续范围">`;
   for (let i = 0; i < cells; i++) {
     const chunkIdx = Math.min(n - 1, Math.floor(i / cells * n));
     let cls = 'progress-cell';
-    if (win && chunkIdx >= win.startChunk && chunkIdx <= win.endChunk) cls += ' current';
-    else if (prep && prep.status === 'completed' && isCoveredChunk(chunkIdx, prep.units, covered)) cls += ' covered';
-    else cls += ' future';
+    const coveredHere = prep && prep.status === 'completed' && isCoveredChunk(chunkIdx, prep.units, covered);
+    if (coveredHere) {
+      // 已学完的单元：实格（已覆盖优先于当前窗口，避免整本窗口时全变空心框）
+      cls += ' covered';
+    } else if (win && !winIsFullBook && chunkIdx >= win.startChunk && chunkIdx <= win.endChunk) {
+      // 当前正在学的窗口：空心框
+      cls += ' current';
+    } else {
+      // 后续范围：浅色
+      cls += ' future';
+    }
     html += `<div class="${cls}"></div>`;
   }
   html += `</div>`;
   if (!compact) {
     html += `<div class="progress-legend"><span class="dot covered"></span>已覆盖 <span class="dot current"></span>当前窗口 <span class="dot future"></span>后续范围</div>`;
+    if (prep && prep.status === 'completed' && (!prep.units || !prep.units.length)) {
+      html += `<div class="muted" style="margin-top:6px">备课完成但未划分出知识单元，无法显示进度。</div>`;
+    } else if (!prep || prep.status !== 'completed') {
+      html += `<div class="muted" style="margin-top:6px">尚未备课，暂无进度（请先在上方点击「立即备课」）。</div>`;
+    }
   }
   return html;
 }
@@ -267,10 +311,13 @@ async function renderTextbooks() {
     <textarea id="nt-persona" placeholder="如：用严谨推导风，多追问公式来源；留空则沿用全局默认人设"></textarea>
     <div class="row" style="margin-top:10px"><button id="nt-save">创建并切片</button><span class="muted" id="nt-msg"></span></div>
   </div>`;
+  const dueMap = {};
+  Store.dueByTextbook().forEach((d) => { dueMap[d.textbookId] = d; });
   state.textbooks.forEach((tb) => {
+    const d = dueMap[tb.id];
     html += `<div class="item">
       <div><div class="title">《${esc(tb.title)}》</div>
-      <div class="meta">切片 ${tb.chunks.length} 段 ｜ 课程 ${tb.courses.length} ｜ 阶段 ${tb.progress.stage}${tb.personaOverride ? ' ｜ 专用人设' : ''}</div></div>
+      <div class="meta">切片 ${tb.chunks.length} 段 ｜ 课程 ${tb.courses.length} ｜ 阶段 ${tb.progress.stage}${tb.personaOverride ? ' ｜ 专用人设' : ''}</div>${d && d.due > 0 ? `<div class="meta" style="margin-top:4px"><span class="pill warn">🔴 ${d.due} 张待复习</span></div>` : ''}</div>
       <div class="spacer"></div>
       <a class="btn ghost" href="#/textbooks/${tb.id}">打开</a>
       <button class="btn danger" data-del="${tb.id}">删除</button>
@@ -351,6 +398,9 @@ async function renderTextbook(tbId) {
   const state = Store.getState();
   const tb = state.textbooks.find((t) => t.id === tbId);
   if (!tb) return (app().innerHTML = `<div class="card">教材不存在</div>`);
+  const dueMap = {};
+  Store.dueByTextbook().forEach((x) => { dueMap[x.textbookId] = x; });
+  const tbDue = dueMap[tbId];
   const prep = tb.prep;
   const prepStatusText = !prep
     ? '尚未备课。建议先对教材做整体梳理，AI 会按知识点划分单元并跟踪进度。'
@@ -360,6 +410,7 @@ async function renderTextbook(tbId) {
 
   let html = `<div class="row"><a class="btn ghost" href="#/textbooks">← 教材库</a><div class="spacer"></div></div>
   <h2>《${esc(tb.title)}》</h2>
+  ${tbDue && tbDue.due > 0 ? `<div class="review-reminder">🔔 本教材有 <b>${tbDue.due}</b> 张闪卡已到期待复习（共 ${tbDue.total} 张）。进入任意课程的「总结/闪卡」页点「开始复习」即可巩固。</div>` : ''}
   <div class="card">
     <h3>每教材人设覆盖（可选，覆盖全局默认人设）</h3>
     <textarea id="po" placeholder="例如：用严谨推导风，多追问公式来源；可不填，留空则沿用全局人设">${esc(tb.personaOverride || '')}</textarea>
@@ -397,7 +448,7 @@ async function renderTextbook(tbId) {
     box.innerHTML = tb.courses.map((c) => `
       <div class="item">
         <div><div class="title">${esc(c.title)}</div>
-        <div class="meta">${c.status === 'active' ? '进行中' : '已结束'} ｜ 对话 ${c.dialogues.length} ｜ 闪卡 ${c.flashcards.length}${c.summary ? ' ｜ 已有总结' : ''}</div></div>
+        <div class="meta">${c.status === 'active' ? '进行中' : '已结束'} ｜ 对话 ${c.dialogues.length} ｜ 闪卡 ${c.flashcards.length}${c.summary ? ' ｜ 已有总结' : ''}${(() => { const cd = (c.flashcards || []).filter((f) => new Date(f.due).getTime() <= Date.now()).length; return cd > 0 ? ` ｜ <span class="pill warn">🔴 ${cd} 待复习</span>` : ''; })()}</div></div>
         <div class="spacer"></div>
         <a class="btn" href="#/textbooks/${tbId}/courses/${c.id}">进入</a>
         <a class="btn ghost" href="#/textbooks/${tbId}/courses/${c.id}/review">总结/闪卡</a>
@@ -590,15 +641,20 @@ async function renderLesson(tbId, courseId) {
     $('#send').onclick = send;
     $('#input').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
     $('#finish').onclick = async () => {
-      if (!confirm('下课并自动生成课后总结与闪卡？')) return;
+      if (!confirm('下课并自动生成课后总结与闪卡？\n\n生成约需 30–90 秒（取决于网络与模型），期间请勿关闭或刷新页面。')) return;
       const btn = $('#finish'); btn.disabled = true;
+      setBusy(true, '正在生成：① 课后总结 → ② 闪卡。请耐心等待，切勿关闭或刷新页面，否则本次生成结果可能丢失（已消耗的 Token 不退）。');
       try {
         const r = await Engine.endCourse(tbId, courseId);
+        setBusy(false);
         renderLesson(tbId, courseId);
         if (r.flashcardError) {
           alert('课程已结束，但闪卡生成失败：' + r.flashcardError + '\n\n请到总结页点击「生成/重生成闪卡」手动重试。');
         }
-      } catch (e) { alert('下课失败：' + e.message); btn.disabled = false; }
+      } catch (e) {
+        setBusy(false);
+        alert('下课失败：' + e.message); btn.disabled = false;
+      }
     };
   }
 
@@ -625,6 +681,8 @@ async function renderReview(tbId, courseId) {
   const tb = state.textbooks.find((t) => t.id === tbId);
   const course = tb && tb.courses.find((c) => c.id === courseId);
   if (!course) return (app().innerHTML = `<div class="card">课程不存在</div>`);
+  // 本课已到期待复习的闪卡数（due<=now）：用于复习页顶部醒目标题，避免用户下课后“看不到提醒”
+  const dueCount = (course.flashcards || []).filter((f) => new Date(f.due).getTime() <= Date.now()).length;
 
   const summaryHtml = (s) => s ? `
     <div class="row"><div class="title">已掌握</div></div><div>${s.mastered.map((x) => `<span class="pill ok">${esc(x)}</span>`).join('') || '无'}</div>
@@ -635,6 +693,7 @@ async function renderReview(tbId, courseId) {
 
   let html = `<div class="row"><a class="btn ghost" href="#/textbooks/${tbId}/courses/${courseId}">← 返回对话</a><div class="spacer"></div></div>
   <h2>${esc(course.title)} · 总结与闪卡</h2>
+  ${dueCount > 0 ? `<div class="review-reminder">🔔 本课程有 <b>${dueCount}</b> 张闪卡已到期待复习（共 ${course.flashcards.length} 张）。建议点上方「开始复习」先巩固这些到期内容。</div>` : ''}
   <div class="card"><h3>课后总结</h3><div id="summary">${summaryHtml(course.summary)}</div>
     <div class="row" style="margin-top:10px"><button id="gen-sum">生成/刷新总结</button><button id="gen-fc">生成/重生成闪卡（覆盖旧）</button></div></div>
   <div class="card">
@@ -645,12 +704,13 @@ async function renderReview(tbId, courseId) {
       <button id="exp-pdf" class="ghost">导出 PDF</button>
     </div>
     <div id="fc-list"></div>
+    <div class="muted" style="margin-top:8px">答题卡配色：<span style="color:#cb2634;font-weight:600">红框=答错</span> ｜ <span style="color:#00875a;font-weight:600">绿框=答对</span> ｜ <span style="color:#165dff;font-weight:600">蓝框=当前题</span></div>
   </div>`;
   app().innerHTML = html;
 
   const renderFc = () => {
     const box = $('#fc-list');
-  if (!course.flashcards.length) { box.innerHTML = `<div class="muted">还没有闪卡，点"生成闪卡"。</div>`; return; }
+  if (!course.flashcards.length) { box.innerHTML = `<div class="muted">还没有闪卡，点"生成/重生成闪卡"。</div>`; return; }
   // 显示闪卡来源，帮助用户区分真实 AI 生成与演示模板
   const providerHint = course.flashcards.some((f) => f.question && f.question.includes('关于本节课的核心知识点'))
     ? '<div class="muted" style="margin-bottom:8px">⚠️ 当前为演示模板闪卡（非 AI 生成）。若已配置 API Key，请点击「生成/重生成闪卡」重新生成。</div>'
@@ -720,7 +780,11 @@ async function renderReview(tbId, courseId) {
     const all = course.flashcards;
     if (!all.length) return alert('还没有闪卡，请先点「生成/重生成闪卡」');
     // 复习状态：全部闪卡连续可练；已作答计入进度（参考 AI 题库小程序的点击式交互）
-    const rs = { tbId, courseId, cards: all.slice(), index: 0, answered: {}, multi: {} };
+    // correct：记录每题对错，用于答题卡（底部编号）红/绿框区分
+    // 到期卡（due<=now）优先排列，让用户先巩固该复习的内容
+    const now = Date.now();
+    const ordered = all.slice().sort((a, b) => (new Date(a.due).getTime() <= now ? 0 : 1) - (new Date(b.due).getTime() <= now ? 0 : 1));
+    const rs = { tbId, courseId, cards: ordered, index: 0, answered: {}, correct: {}, multi: {} };
     const getCard = () => rs.cards[rs.index];
 
     function renderCard() {
@@ -759,7 +823,13 @@ async function renderReview(tbId, courseId) {
         ${hasAnswered && (f.type === 'multiple' ? tempSel.includes(o.label) : userAns === o.label) && !correctSet.has(o.label) ? '<span class="fc-opt-icon">✗</span>' : ''}
       </div>`).join('');
 
-      const jumpHtml = rs.cards.map((c, i) => `<button class="fc-jump ${i === rs.index ? 'fc-jump-cur' : (rs.answered[c.id] !== undefined ? 'fc-jump-done' : '')}" data-idx="${i}">${i + 1}</button>`).join('');
+      const jumpHtml = rs.cards.map((c, i) => {
+        let stateCls;
+        if (i === rs.index) stateCls = 'fc-jump-cur';
+        else if (rs.answered[c.id] !== undefined) stateCls = rs.correct[c.id] ? 'fc-jump-done' : 'fc-jump-wrong';
+        else stateCls = '';
+        return `<button class="fc-jump ${stateCls}" data-idx="${i}">${i + 1}</button>`;
+      }).join('');
       const expHtml = hasAnswered && f.explanation ? `<div class="fc-exp">📝 解析：${renderMD(f.explanation)}</div>` : '';
       const box = $('#fc-list');
       box.innerHTML = `<div class="fc-review">
@@ -794,6 +864,7 @@ async function renderReview(tbId, courseId) {
           if (rs.answered[f.id] !== undefined) return;
           const correct = label === String(f.correctKey || '').toUpperCase();
           rs.answered[f.id] = label;
+          rs.correct[f.id] = correct;
           Store.reviewFlashcard(tbId, courseId, f.id, correct ? 2 : 1);
           renderCard();
         }
@@ -806,6 +877,7 @@ async function renderReview(tbId, courseId) {
         const userSet2 = new Set(arr.slice().sort().map((k) => k.toUpperCase()));
         const correct = correctSet2.size === userSet2.size && [...correctSet2].every((k) => userSet2.has(k));
         rs.answered[f.id] = arr.slice().sort().join(',');
+        rs.correct[f.id] = correct;
         Store.reviewFlashcard(tbId, courseId, f.id, correct ? 2 : 1);
         renderCard();
       };

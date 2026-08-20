@@ -93,7 +93,19 @@ label { font-size: 12px; color: #86909c; display: block; margin: 8px 0 4px; }
 }
 .fc-jump-cur { background: #165dff; color: #fff; border-color: #165dff; }
 .fc-jump-done { background: #e8f8f0; color: #00875a; border-color: #b6e8cf; }
+.fc-jump-wrong { background: #feecec; color: #cb2634; border-color: #f53f3f; }
 .fc-jump:hover { opacity: .85; }
+
+/* 待复习提醒（仪表盘以外的入口：复习页 / 教材页醒目提示） */
+.review-reminder {
+  margin: 0 0 12px; padding: 12px 14px; border-radius: 10px;
+  background: #fff7e8; border: 1px solid #ffcf8b; color: #8a5a00; font-size: 14px; line-height: 1.5;
+}
+.review-reminder b { color: #d4380d; }
+
+/* 长任务遮罩（下线课生成总结/闪卡时的等待提示） */
+.busy-spinner { width: 34px; height: 34px; border: 4px solid #e5e6eb; border-top-color: #2b6cff; border-radius: 50%; margin: 16px auto 0; animation: socratopia-spin .8s linear infinite; }
+@keyframes socratopia-spin { to { transform: rotate(360deg); } }
 
 /* 进度条/阶段 */
 .stage { font-size: 12px; color: #86909c; }
