@@ -305,6 +305,10 @@ window.Engine = (function () {
     if (!tb) throw new Error('教材不存在');
     const totalChunks = tb.chunks.length;
     if (!totalChunks) throw new Error('教材为空，无法备课');
+    const cfg = Store.getApiConfigRaw();
+    if (!cfg || !cfg.apiKey || !cfg.apiKey.trim()) {
+      throw new Error('未配置 API Key，无法备课。请先在「设置」页填写 DeepSeek API Key。');
+    }
     Store.updatePrep(textbookId, { status: 'processing', detailLevel, scheduledAt: null, error: null });
     const chunksText = formatChunks(tb.chunks, MAX_PREP_CHUNKS);
     const messages = [
@@ -312,25 +316,27 @@ window.Engine = (function () {
       { role: 'user', content: `以下是一本教材的连续片段（共 ${totalChunks} 段，本次分析前 ${Math.min(totalChunks, MAX_PREP_CHUNKS)} 段），请按知识点划分为教学单元、细分100个知识点并生成教学大纲，输出 JSON：\n\n${chunksText}` },
     ];
     try {
-      const { content, provider } = await callLLM(messages, { task: 'prep', temperature: 0.35, max_tokens: 4000 });
-      let units = [], knowledgePoints = [], syllabus = '';
-      if (provider !== 'mock') {
-        const parsed = parseJSON(content) || {};
-        units = normalizeUnits((parsed && parsed.units) || [], totalChunks);
-        // 解析知识点列表
-        if (Array.isArray(parsed.knowledgePoints) && parsed.knowledgePoints.length) {
-          knowledgePoints = parsed.knowledgePoints.map((kp, idx) => ({
-            id: String(kp.id || `kp_${String(idx + 1).padStart(3, '0')}`),
-            title: String(kp.title || `知识点 ${idx + 1}`).trim(),
-            unitIndex: Math.max(0, parseInt(kp.unitIndex, 10) || 0),
-            chunkStart: Math.max(0, parseInt(kp.chunkStart, 10) || 0),
-            chunkEnd: Math.max(0, parseInt(kp.chunkEnd, 10) || (totalChunks - 1)),
-          }));
-        }
-        // 解析教学大纲
-        if (typeof parsed.syllabus === 'string' && parsed.syllabus.trim()) {
-          syllabus = parsed.syllabus.trim();
-        }
+      const { content, provider } = await callLLM(messages, { task: 'prep', temperature: 0.35, max_tokens: 4000, failLoud: true });
+      if (provider === 'mock') {
+        throw new Error('未配置 API Key 或 API 调用失败，无法备课。请检查「设置」中的 API Key 和网络连接。');
+      }
+      const parsed = parseJSON(content) || {};
+      const units = normalizeUnits((parsed && parsed.units) || [], totalChunks);
+      if (!units.length) {
+        const preview = String(content || '').replace(/\s+/g, ' ').slice(0, 300);
+        console.warn('[Engine] 备课解析失败，原始响应前 300 字：', preview);
+        throw new Error(`AI 返回的备课结果无法解析出有效的单元划分。响应片段：${preview || '（空）'}`);
+      }
+      // 解析知识点列表
+      let knowledgePoints = [];
+      if (Array.isArray(parsed.knowledgePoints) && parsed.knowledgePoints.length) {
+        knowledgePoints = parsed.knowledgePoints.map((kp, idx) => ({
+          id: String(kp.id || `kp_${String(idx + 1).padStart(3, '0')}`),
+          title: String(kp.title || `知识点 ${idx + 1}`).trim(),
+          unitIndex: Math.max(0, parseInt(kp.unitIndex, 10) || 0),
+          chunkStart: Math.max(0, parseInt(kp.chunkStart, 10) || 0),
+          chunkEnd: Math.max(0, parseInt(kp.chunkEnd, 10) || (totalChunks - 1)),
+        }));
       }
       // 如果没有获取到知识点，从 units 的 knowledgePoints 扁平化生成
       if (!knowledgePoints.length && units.length) {
@@ -348,16 +354,19 @@ window.Engine = (function () {
           });
         });
       }
-      if (!units.length) { const mock = mockPrep(tb.chunks); units = mock.units; knowledgePoints = mock.knowledgePoints; syllabus = mock.syllabus; }
-      if (!knowledgePoints.length) { const mock = mockPrep(tb.chunks); knowledgePoints = mock.knowledgePoints; syllabus = mock.syllabus; }
+      // 解析教学大纲
+      let syllabus = '';
+      if (typeof parsed.syllabus === 'string' && parsed.syllabus.trim()) {
+        syllabus = parsed.syllabus.trim();
+      }
       if (!syllabus) syllabus = generateMockSyllabus(units);
       const prep = { status: 'completed', detailLevel, units, knowledgePoints, syllabus, completedAt: new Date().toISOString(), error: null };
       Store.setPrep(textbookId, prep);
       Store.setProgressWindow(textbookId, Store.getCurrentWindow(tb));
       return prep;
     } catch (e) {
-      const fallback = mockPrep(tb.chunks); fallback.error = e.message;
-      Store.setPrep(textbookId, fallback); return fallback;
+      Store.updatePrep(textbookId, { status: 'error', error: e.message, completedAt: null });
+      throw e;
     }
   }
 

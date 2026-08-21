@@ -269,7 +269,10 @@ function renderProgressGrid(tb, compact) {
   if (!compact) {
     html += `<div class="progress-legend"><span class="dot mastered"></span>已掌握 <span class="dot weak"></span>薄弱点 <span class="dot unlearned"></span>未学习</div>`;
     if (!prep || prep.status !== 'completed') {
-      html += `<div class="muted" style="margin-top:6px">尚未备课，暂无进度（请先在上方点击「立即备课」）。</div>`;
+      const msg = (prep && prep.status === 'error')
+        ? `上次备课失败：${esc(prep.error || '未知错误')}。可点击「立即备课」重试。`
+        : '尚未备课，暂无进度（请先在上方点击「立即备课」）。';
+      html += `<div class="muted" style="margin-top:6px">${msg}</div>`;
     } else if (!kps || !kps.length) {
       html += `<div class="muted" style="margin-top:6px">备课完成但未划分出知识点，无法显示细粒度进度。</div>`;
     }
@@ -399,7 +402,9 @@ async function renderTextbook(tbId) {
     ? '尚未备课。建议先对教材做整体梳理，AI 会按知识点划分单元并跟踪进度。'
     : prep.status === 'processing'
       ? '正在备课中，请稍候…'
-      : `备课完成（${prep.detailLevel} 档），共 ${(prep.units || []).length} 个单元${Array.isArray(prep.knowledgePoints) && prep.knowledgePoints.length ? ` · ${prep.knowledgePoints.length} 个知识点` : ''} · ${new Date(prep.completedAt).toLocaleString()}`;
+      : prep.status === 'error'
+        ? `备课失败：${prep.error || '未知错误'}。请检查 API Key 与网络后重试，或清除备课后重新点击「立即备课」。`
+        : `备课完成（${prep.detailLevel} 档），共 ${(prep.units || []).length} 个单元${Array.isArray(prep.knowledgePoints) && prep.knowledgePoints.length ? ` · ${prep.knowledgePoints.length} 个知识点` : ''} · ${new Date(prep.completedAt).toLocaleString()}`;
 
   let html = `<div class="row"><a class="btn ghost" href="#/textbooks">← 教材库</a><div class="spacer"></div></div>
   <h2>《${esc(tb.title)}》</h2>
