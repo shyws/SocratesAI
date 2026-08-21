@@ -127,33 +127,37 @@ label { font-size: 12px; color: #86909c; display: block; margin: 8px 0 4px; }
 .modal button { font-size: 13px; }
 .modal button.ghost { background: #f2f3f5; color: #1f2329; }
 
-/* 教材阅读进度小方格 */
+/* 教材阅读进度小方格（紧凑型：仅作进度直观感受，不需太大） */
 .progress-grid {
   display: grid;
-  grid-template-columns: repeat(20, 1fr);
-  gap: 3px;
-  margin: 8px 0;
+  grid-template-columns: repeat(40, 1fr);
+  gap: 2px;
+  margin: 6px 0;
 }
 .progress-grid.compact {
-  grid-template-columns: repeat(30, 1fr);
-  gap: 2px;
+  grid-template-columns: repeat(50, 1fr);
+  gap: 1px;
   margin: 4px 0;
 }
 .progress-cell {
   aspect-ratio: 1 / 1;
-  border-radius: 2px;
+  border-radius: 1px;
   background: #e5e6eb;
-  border: 1px solid transparent;
+  border: 0.5px solid transparent;
 }
-.progress-cell.covered {
-  background: #2b6cff;
-  border-color: #2b6cff;
+/* 已掌握（实心）：绿色填充 */
+.progress-cell.mastered {
+  background: #00a870;
+  border-color: #00a870;
 }
-.progress-cell.current {
+/* 薄弱点（空心）：白色底 + 绿色边框 */
+.progress-cell.weak {
   background: #fff;
-  border-color: #2b6cff;
+  border-color: #d25f00;
+  border-width: 1px;
 }
-.progress-cell.future {
+/* 未学习（灰色） */
+.progress-cell.unlearned {
   background: #f2f3f5;
   border-color: #e5e6eb;
 }
@@ -166,14 +170,14 @@ label { font-size: 12px; color: #86909c; display: block; margin: 8px 0 4px; }
 }
 .progress-legend .dot {
   display: inline-block;
-  width: 10px;
-  height: 10px;
-  border-radius: 2px;
+  width: 8px;
+  height: 8px;
+  border-radius: 1px;
   margin-right: 4px;
 }
-.progress-legend .dot.covered { background: #2b6cff; }
-.progress-legend .dot.current { background: #fff; border: 1px solid #2b6cff; }
-.progress-legend .dot.future { background: #f2f3f5; border: 1px solid #e5e6eb; }
+.progress-legend .dot.mastered { background: #00a870; }
+.progress-legend .dot.weak { background: #fff; border: 1px solid #d25f00; }
+.progress-legend .dot.unlearned { background: #f2f3f5; border: 0.5px solid #e5e6eb; }
 .unit-item {
   padding: 10px;
   border: 1px solid #e5e6eb;
@@ -182,6 +186,31 @@ label { font-size: 12px; color: #86909c; display: block; margin: 8px 0 4px; }
   background: #fafbfc;
 }
 .unit-item .row { justify-content: space-between; }
+
+/* 教学大纲展示区 */
+.syllabus-section {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid #e5e6eb;
+  border-radius: 8px;
+  background: #fafbfc;
+}
+.syllabus-section h4 {
+  font-size: 14px;
+  margin: 0;
+  color: #1f2329;
+}
+.syllabus-body {
+  max-height: 400px;
+  overflow-y: auto;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #4e5969;
+}
+.syllabus-body h2 { font-size: 16px; color: #1f2329; border-bottom: 2px solid #2b6cff; padding-bottom: 4px; margin: 14px 0 8px; }
+.syllabus-body h3 { font-size: 14px; color: #2b6cff; margin: 10px 0 6px; }
+.syllabus-body ul, .syllabus-body ol { padding-left: 20px; margin: 4px 0; }
+.syllabus-body li { margin: 2px 0; }
 
 /* Markdown 富文本渲染（对话/总结/闪卡/备课摘要） */
 .md { line-height: 1.6; word-wrap: break-word; white-space: normal; color: inherit; }

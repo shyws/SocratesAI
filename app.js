@@ -235,50 +235,43 @@ async function renderDashboard() {
   app().innerHTML = html;
 }
 
-/* ----------------- 教材阅读进度小方格 ---------------- */
-function isCoveredChunk(chunkIdx, units, coveredUnitIndices) {
-  if (!Array.isArray(units)) return false;
-  const covered = new Set(coveredUnitIndices || []);
-  for (let i = 0; i < units.length; i++) {
-    if (!covered.has(i)) continue;
-    const u = units[i];
-    if (chunkIdx >= (u.startChunk || 0) && chunkIdx <= ((u.endChunk ?? u.startChunk) || 0)) return true;
-  }
-  return false;
-}
-
+/* ----------------- 教材阅读进度小方格（基于100个知识点的掌握状态） ---------------- */
 function renderProgressGrid(tb, compact) {
-  const n = (tb.chunks || []).length || 1;
   const prep = tb.prep;
-  const covered = tb.progress && tb.progress.coveredUnitIndices ? tb.progress.coveredUnitIndices : [];
-  const win = tb.progress && tb.progress.currentWindow ? tb.progress.currentWindow : null;
-  const cells = compact ? 30 : 100;
-  // 退化情形：当前窗口覆盖整本（所有单元已覆盖 / 未备课回退），此时不应让全部格子都显示"当前"空心框
-  const winIsFullBook = win && win.startChunk <= 0 && win.endChunk >= (n - 1);
-  let html = `<div class="progress-grid ${compact ? 'compact' : ''}" title="每个小格约代表全书 ${Math.round(100 / cells)}%。实格：已学完；空心框：正在学；浅色：后续范围">`;
+  const kpStatus = (tb.progress && tb.progress.kpStatus) || {};
+  // 优先使用备课生成的100个知识点；退化到单元数×10的模拟格子
+  const kps = (prep && prep.status === 'completed' && Array.isArray(prep.knowledgePoints) && prep.knowledgePoints.length)
+    ? prep.knowledgePoints
+    : null;
+  const cells = compact ? 30 : (kps ? Math.min(kps.length, 110) : 100);
+  const displayKps = kps ? kps.slice(0, cells) : null;
+
+  let html = `<div class="progress-grid ${compact ? 'compact' : ''}" title="每格=1个知识点。实心=已掌握；空心=薄弱；灰色=未学习">`;
   for (let i = 0; i < cells; i++) {
-    const chunkIdx = Math.min(n - 1, Math.floor(i / cells * n));
     let cls = 'progress-cell';
-    const coveredHere = prep && prep.status === 'completed' && isCoveredChunk(chunkIdx, prep.units, covered);
-    if (coveredHere) {
-      // 已学完的单元：实格（已覆盖优先于当前窗口，避免整本窗口时全变空心框）
-      cls += ' covered';
-    } else if (win && !winIsFullBook && chunkIdx >= win.startChunk && chunkIdx <= win.endChunk) {
-      // 当前正在学的窗口：空心框
-      cls += ' current';
+    if (displayKps && displayKps[i]) {
+      const kp = displayKps[i];
+      const st = kpStatus[kp.id] || 'unlearned';
+      if (st === 'mastered') {
+        cls += ' mastered';   // 已掌握：实心
+      } else if (st === 'weak') {
+        cls += ' weak';       // 薄弱：空心
+      } else {
+        cls += ' unlearned';  // 未学习：灰色
+      }
     } else {
-      // 后续范围：浅色
-      cls += ' future';
+      // 无知识点数据时的退化显示
+      cls += ' unlearned';
     }
-    html += `<div class="${cls}"></div>`;
+    html += `<div class="${cls}"${displayKps && displayKps[i] ? ` title="${esc(displayKps[i].title)}"` : ''}></div>`;
   }
   html += `</div>`;
   if (!compact) {
-    html += `<div class="progress-legend"><span class="dot covered"></span>已覆盖 <span class="dot current"></span>当前窗口 <span class="dot future"></span>后续范围</div>`;
-    if (prep && prep.status === 'completed' && (!prep.units || !prep.units.length)) {
-      html += `<div class="muted" style="margin-top:6px">备课完成但未划分出知识单元，无法显示进度。</div>`;
-    } else if (!prep || prep.status !== 'completed') {
+    html += `<div class="progress-legend"><span class="dot mastered"></span>已掌握 <span class="dot weak"></span>薄弱点 <span class="dot unlearned"></span>未学习</div>`;
+    if (!prep || prep.status !== 'completed') {
       html += `<div class="muted" style="margin-top:6px">尚未备课，暂无进度（请先在上方点击「立即备课」）。</div>`;
+    } else if (!kps || !kps.length) {
+      html += `<div class="muted" style="margin-top:6px">备课完成但未划分出知识点，无法显示细粒度进度。</div>`;
     }
   }
   return html;
@@ -406,7 +399,7 @@ async function renderTextbook(tbId) {
     ? '尚未备课。建议先对教材做整体梳理，AI 会按知识点划分单元并跟踪进度。'
     : prep.status === 'processing'
       ? '正在备课中，请稍候…'
-      : `备课完成（${prep.detailLevel} 档），共 ${(prep.units || []).length} 个单元 · ${new Date(prep.completedAt).toLocaleString()}`;
+      : `备课完成（${prep.detailLevel} 档），共 ${(prep.units || []).length} 个单元${Array.isArray(prep.knowledgePoints) && prep.knowledgePoints.length ? ` · ${prep.knowledgePoints.length} 个知识点` : ''} · ${new Date(prep.completedAt).toLocaleString()}`;
 
   let html = `<div class="row"><a class="btn ghost" href="#/textbooks">← 教材库</a><div class="spacer"></div></div>
   <h2>《${esc(tb.title)}》</h2>
@@ -466,13 +459,25 @@ async function renderTextbook(tbId) {
   const renderUnits = () => {
     const box = $('#prep-units');
     if (!prep || prep.status !== 'completed' || !prep.units || !prep.units.length) { box.innerHTML = ''; return; }
-    box.innerHTML = `<details><summary>查看 ${prep.units.length} 个知识单元</summary>` +
+    const kpCount = Array.isArray(prep.knowledgePoints) ? prep.knowledgePoints.length : 0;
+    let html = `<details open><summary>查看 ${prep.units.length} 个知识单元${kpCount ? `（共 ${kpCount} 个知识点）` : ''}</summary>` +
       prep.units.map((u, i) => `
         <div class="unit-item">
           <div class="row"><b>单元 ${i + 1}：${esc(u.title)}</b><span class="muted">片段 ${u.startChunk}~${u.endChunk}</span></div>
           <div class="muted">${renderMD(u.summary || '')}</div>
         </div>`).join('') +
       `</details>`;
+    // 教学大纲展示与下载
+    if (prep.syllabus && prep.syllabus.trim()) {
+      html += `<div class="syllabus-section">
+        <div class="row" style="margin-bottom:8px"><h4 style="margin:0">📋 教学大纲</h4><button id="dl-syllabus" class="ghost" style="font-size:12px;padding:4px 10px">下载 MD</button></div>
+        <div class="syllabus-body">${renderMD(prep.syllabus)}</div>
+      </div>`;
+    }
+    box.innerHTML = html;
+    // 绑定下载按钮
+    const dlBtn = $('#dl-syllabus', box);
+    if (dlBtn) dlBtn.onclick = () => download(`${tb.title}_教学大纲.md`, prep.syllabus, 'text/markdown');
   };
   renderUnits();
 

@@ -265,12 +265,38 @@ window.Engine = (function () {
     const unitCount = Math.min(Math.max(3, Math.ceil(n / 12)), 8);
     const per = Math.ceil(n / unitCount);
     const units = [];
+    const knowledgePoints = [];
+    let kpIdx = 0;
     for (let i = 0; i < unitCount; i++) {
       const s = i * per;
       const e = Math.min(n - 1, (i + 1) * per - 1);
-      units.push({ title: `单元 ${i + 1}`, summary: '（演示模式）本单元涵盖该部分教材片段的核心内容。', knowledgePoints: [`知识点 ${i * 2 + 1}`, `知识点 ${i * 2 + 2}`], startChunk: s, endChunk: e });
+      const kpPerUnit = Math.max(2, Math.round(100 / unitCount));
+      const kps = [];
+      for (let j = 0; j < kpPerUnit && kpIdx < 100; j++) {
+        const kpId = `kp_${String(kpIdx + 1).padStart(3, '0')}`;
+        knowledgePoints.push({ id: kpId, title: `知识点 ${kpIdx + 1}（演示）`, unitIndex: i, chunkStart: s, chunkEnd: e });
+        kps.push(`知识点 ${kpIdx + 1}`);
+        kpIdx++;
+      }
+      units.push({ title: `单元 ${i + 1}`, summary: '（演示模式）本单元涵盖该部分教材片段的核心内容。', knowledgePoints: kps, startChunk: s, endChunk: e });
     }
-    return { status: 'completed', detailLevel: 2, units, completedAt: new Date().toISOString() };
+    const syllabus = generateMockSyllabus(units);
+    return { status: 'completed', detailLevel: 2, units, knowledgePoints, syllabus, completedAt: new Date().toISOString() };
+  }
+
+  function generateMockSyllabus(units) {
+    let md = '# 教材教学大纲（演示模式）\n\n';
+    units.forEach((u, i) => {
+      md += `## 第${i + 1}章 ${u.title}\n\n`;
+      const kps = u.knowledgePoints || [];
+      const half = Math.ceil(kps.length / 2);
+      md += `### ${u.title}·基础\n\n`;
+      kps.slice(0, half).forEach((kp) => { md += `- ${kp}\n`; });
+      md += `\n### ${u.title}·进阶\n\n`;
+      kps.slice(half).forEach((kp) => { md += `- ${kp}\n`; });
+      md += '\n';
+    });
+    return md;
   }
 
   async function prepareNow(textbookId, detailLevel = 2) {
@@ -283,14 +309,49 @@ window.Engine = (function () {
     const chunksText = formatChunks(tb.chunks, MAX_PREP_CHUNKS);
     const messages = [
       { role: 'system', content: P.buildPrepSystem(detailLevel) },
-      { role: 'user', content: `以下是一本教材的连续片段（共 ${totalChunks} 段，本次分析前 ${Math.min(totalChunks, MAX_PREP_CHUNKS)} 段），请按知识点划分为教学单元并输出 JSON：\n\n${chunksText}` },
+      { role: 'user', content: `以下是一本教材的连续片段（共 ${totalChunks} 段，本次分析前 ${Math.min(totalChunks, MAX_PREP_CHUNKS)} 段），请按知识点划分为教学单元、细分100个知识点并生成教学大纲，输出 JSON：\n\n${chunksText}` },
     ];
     try {
-      const { content, provider } = await callLLM(messages, { task: 'prep', temperature: 0.35, max_tokens: 2000 });
-      let units = [];
-      if (provider !== 'mock') { const parsed = parseJSON(content); units = normalizeUnits((parsed && parsed.units) || [], totalChunks); }
-      if (!units.length) units = mockPrep(tb.chunks).units;
-      const prep = { status: 'completed', detailLevel, units, completedAt: new Date().toISOString(), error: null };
+      const { content, provider } = await callLLM(messages, { task: 'prep', temperature: 0.35, max_tokens: 4000 });
+      let units = [], knowledgePoints = [], syllabus = '';
+      if (provider !== 'mock') {
+        const parsed = parseJSON(content) || {};
+        units = normalizeUnits((parsed && parsed.units) || [], totalChunks);
+        // 解析知识点列表
+        if (Array.isArray(parsed.knowledgePoints) && parsed.knowledgePoints.length) {
+          knowledgePoints = parsed.knowledgePoints.map((kp, idx) => ({
+            id: String(kp.id || `kp_${String(idx + 1).padStart(3, '0')}`),
+            title: String(kp.title || `知识点 ${idx + 1}`).trim(),
+            unitIndex: Math.max(0, parseInt(kp.unitIndex, 10) || 0),
+            chunkStart: Math.max(0, parseInt(kp.chunkStart, 10) || 0),
+            chunkEnd: Math.max(0, parseInt(kp.chunkEnd, 10) || (totalChunks - 1)),
+          }));
+        }
+        // 解析教学大纲
+        if (typeof parsed.syllabus === 'string' && parsed.syllabus.trim()) {
+          syllabus = parsed.syllabus.trim();
+        }
+      }
+      // 如果没有获取到知识点，从 units 的 knowledgePoints 扁平化生成
+      if (!knowledgePoints.length && units.length) {
+        let kpIdx = 0;
+        units.forEach((u, ui) => {
+          (u.knowledgePoints || []).forEach((kpTitle) => {
+            knowledgePoints.push({
+              id: `kp_${String(kpIdx + 1).padStart(3, '0')}`,
+              title: String(kpTitle).trim(),
+              unitIndex: ui,
+              chunkStart: u.startChunk || 0,
+              chunkEnd: u.endChunk || (totalChunks - 1),
+            });
+            kpIdx++;
+          });
+        });
+      }
+      if (!units.length) { const mock = mockPrep(tb.chunks); units = mock.units; knowledgePoints = mock.knowledgePoints; syllabus = mock.syllabus; }
+      if (!knowledgePoints.length) { const mock = mockPrep(tb.chunks); knowledgePoints = mock.knowledgePoints; syllabus = mock.syllabus; }
+      if (!syllabus) syllabus = generateMockSyllabus(units);
+      const prep = { status: 'completed', detailLevel, units, knowledgePoints, syllabus, completedAt: new Date().toISOString(), error: null };
       Store.setPrep(textbookId, prep);
       Store.setProgressWindow(textbookId, Store.getCurrentWindow(tb));
       return prep;
@@ -476,6 +537,31 @@ window.Engine = (function () {
     const pendingQuestion = cleanPending(summary.pendingQuestion || fallbackPending || '');
     const saved = Store.saveCourse(textbookId, courseId, { pendingQuestion, status: 'ended', endedAt: new Date().toISOString() });
     Store.advanceProgress(textbookId);
+    // 根据课后总结更新知识点状态（mastered/weak → 对应KP）
+    if (summary && tb.prep && Array.isArray(tb.prep.knowledgePoints) && tb.prep.knowledgePoints.length) {
+      const kpStatusUpdates = {};
+      const kps = tb.prep.knowledgePoints;
+      (summary.mastered || []).forEach((m) => {
+        kps.forEach((kp) => {
+          if (kp.title.includes(m) || m.includes(kp.title)) kpStatusUpdates[kp.id] = 'mastered';
+        });
+      });
+      (summary.weak || []).forEach((w) => {
+        kps.forEach((kp) => {
+          if (kp.title.includes(w) || w.includes(kp.title)) kpStatusUpdates[kp.id] = 'weak';
+        });
+      });
+      // 当前窗口内的未匹配KP标记为unlearned
+      const win = course.currentWindow || Store.getCurrentWindow(tb);
+      if (win && win.startChunk != null) {
+        kps.forEach((kp) => {
+          if (kp.chunkStart >= win.startChunk - 2 && kp.chunkStart <= (win.endChunk || win.startChunk) + 2) {
+            if (!kpStatusUpdates[kp.id]) kpStatusUpdates[kp.id] = 'unlearned';
+          }
+        });
+      }
+      if (Object.keys(kpStatusUpdates).length) Store.updateKpStatus(textbookId, kpStatusUpdates);
+    }
     return { summary: saved.summary, flashcards: saved.flashcards, pendingQuestion, courseId, flashcardError, flashcardProvider };
   }
 

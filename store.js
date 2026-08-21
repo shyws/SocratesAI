@@ -19,6 +19,7 @@ window.Store = (function () {
     tb.progress = Object.assign({
       stage: 1, mastered: [], weak: [], currentGoal: '', currentUnitIndex: -1,
       coveredUnitIndices: [], currentWindow: null,
+      kpStatus: {},  //知识点状态映射：kpId → 'mastered' | 'weak' | 'unlearned'
     }, tb.progress || {});
     if (tb.prep === undefined) tb.prep = null;
     if (!Array.isArray(tb.courses)) tb.courses = [];
@@ -166,6 +167,14 @@ window.Store = (function () {
       tb.progress.currentWindow = { startChunk: 0, endChunk: Math.max(0, n - 1), unitIndex: -1 };
     }
     save(); return tb.progress;
+  }
+  /* ---- 知识点状态（per-KP: mastered / weak / unlearned） ---- */
+  function getKpStatus(tbId) { const tb = findTextbook(tbId); return tb ? (tb.progress && tb.progress.kpStatus) || {} : {}; }
+  function updateKpStatus(tbId, kpStatusMap) {
+    const tb = findTextbook(tbId); if (!tb) throw new Error('教材不存在');
+    if (!tb.progress) tb.progress = {};
+    tb.progress.kpStatus = Object.assign(tb.progress.kpStatus || {}, kpStatusMap);
+    save(); return tb.progress.kpStatus;
   }
 
   /* ---------------- 课程 ---------------- */
@@ -345,6 +354,7 @@ window.Store = (function () {
     getState, getApiConfigRaw, updateApiConfig, updateGlobalPersona,
     createTextbook, updateTextbook, deleteTextbook,
     setPrep, getPrep, updatePrep, cancelPrep, getCurrentWindow, setProgressWindow, advanceProgress,
+    getKpStatus, updateKpStatus,
     createCourse, appendDialogue, setSummary, saveCourse, getActiveCourse, clearActiveCourse, deleteCourse,
     addFlashcards, updateFlashcard, deleteFlashcard, toggleFlashcardFavorite, reviewFlashcard, dueByTextbook,
     getEmbeddings, setEmbeddings, setRagMode,
