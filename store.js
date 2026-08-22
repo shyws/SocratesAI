@@ -23,6 +23,9 @@ window.Store = (function () {
     }, tb.progress || {});
     if (tb.prep === undefined) tb.prep = null;
     if (!Array.isArray(tb.courses)) tb.courses = [];
+    // 模式：'textbook'（默认，有教材正文）| 'outline'（仅导入大纲，无教材正文）
+    if (tb.mode !== 'outline') tb.mode = 'textbook';
+    if (tb.mode === 'outline') { tb.chunks = []; } // 大纲模式无正文切片
     tb.embeddings = null; // 向量不随备份迁移，导入后由引擎按需重新生成
     return tb;
   }
@@ -114,6 +117,89 @@ window.Store = (function () {
     return { ok: true };
   }
 
+  /* ---------------- 导入三级大纲（无教材正文模式） ---------------- */
+  // 解析三级 Markdown 大纲：## 单元 → ### 小节 → - 知识点。
+  // 返回 { units, knowledgePoints, syllabus }，可直接作为 prep 内容。
+  function parseOutline(markdown) {
+    const lines = (markdown || '').split(/\r?\n/);
+    const units = [];
+    let cur = null;
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line) continue;
+      if (/^#\s+/.test(line)) continue; // 文档总标题（# 一级），忽略，教材标题由外部单独提供
+      if (/^##\s+/.test(line)) {
+        if (cur) units.push(cur);
+        cur = { title: line.replace(/^##\s+/, '').trim(), summary: '', sections: [], kps: [], startChunk: units.length, endChunk: units.length };
+        continue;
+      }
+      if (/^###\s+/.test(line)) {
+        if (cur) cur.sections.push(line.replace(/^###\s+/, '').trim());
+        continue;
+      }
+      if (/^[-*]\s+/.test(line) || /^\d+[.、)]\s+/.test(line)) {
+        if (!cur) cur = { title: '导入大纲', summary: '', sections: [], kps: [], startChunk: 0, endChunk: 0 };
+        const t = line.replace(/^[-*]\s+/, '').replace(/^\d+[.、)]\s+/, '').trim();
+        if (t) cur.kps.push(t);
+        continue;
+      }
+      // 普通段落：若紧跟单元标题、且尚未出现小节/知识点，作为单元摘要
+      if (cur && cur.kps.length === 0 && cur.sections.length === 0) {
+        cur.summary = (cur.summary ? cur.summary + ' ' : '') + line;
+      }
+    }
+    if (cur) units.push(cur);
+    if (!units.length) {
+      throw new Error('大纲解析失败：未找到任何「## 单元」或知识点。请按三级结构组织：## 单元 → ### 小节 → - 知识点。');
+    }
+    units.forEach((u) => { if (!u.summary && u.sections.length) u.summary = '包含：' + u.sections.join('、'); });
+    const knowledgePoints = [];
+    let kpIdx = 0;
+    const builtUnits = units.map((u, i) => {
+      const kps = u.kps.map((t) => {
+        const kp = { id: `kp_${String(kpIdx + 1).padStart(3, '0')}`, title: t, unitIndex: i, chunkStart: i, chunkEnd: i };
+        knowledgePoints.push(kp); kpIdx++; return t;
+      });
+      return { title: u.title, summary: (u.summary || '').trim(), knowledgePoints: kps, startChunk: i, endChunk: i };
+    });
+    return { units: builtUnits, knowledgePoints, syllabus: (markdown || '').trim() };
+  }
+
+  // 新建「大纲模式」教材：无正文，prep 直接由导入的三级大纲生成。
+  function createOutlineTextbook({ title, outline, personaOverride }) {
+    const s = load();
+    const parsed = parseOutline(outline);
+    const tb = normalizeTextbook({
+      id: uid('tb_'), title: (title || '未命名大纲').trim(),
+      chunks: [], personaOverride: personaOverride || '',
+      courses: [], activeCourseId: null, mode: 'outline',
+      prep: {
+        status: 'completed', detailLevel: 0, units: parsed.units,
+        knowledgePoints: parsed.knowledgePoints, syllabus: parsed.syllabus,
+        completedAt: new Date().toISOString(), error: null, phase: null,
+      },
+    });
+    s.textbooks.push(tb); save(); return tb;
+  }
+
+  // 向已存在（或新建）的「大纲模式」教材重新导入大纲：覆盖 prep 并重置进度，避免旧 KP 状态错配。
+  function importOutlineToTextbook(tbId, { title, outline }) {
+    const tb = findTextbook(tbId); if (!tb) throw new Error('教材不存在');
+    const parsed = parseOutline(outline);
+    tb.mode = 'outline';
+    tb.chunks = [];
+    if (title && title.trim()) tb.title = title.trim();
+    tb.prep = {
+      status: 'completed', detailLevel: 0, units: parsed.units,
+      knowledgePoints: parsed.knowledgePoints, syllabus: parsed.syllabus,
+      completedAt: new Date().toISOString(), error: null, phase: null,
+    };
+    tb.progress = Object.assign(tb.progress || {}, {
+      currentUnitIndex: -1, coveredUnitIndices: [], currentWindow: null, kpStatus: {},
+    });
+    save(); return tb;
+  }
+
   /* ---------------- 备课 ---------------- */
   function setPrep(tbId, prep) { const tb = findTextbook(tbId); if (!tb) throw new Error('教材不存在'); tb.prep = prep || null; save(); return tb.prep; }
   function getPrep(tbId) { const tb = findTextbook(tbId); if (!tb) throw new Error('教材不存在'); return tb.prep; }
@@ -125,17 +211,22 @@ window.Store = (function () {
 
   /* ---------------- 进度窗口 ---------------- */
   function getCurrentWindow(tb) {
+    const isOutline = tb.mode === 'outline';
     const n = (tb.chunks || []).length;
-    if (!n) return null;
+    if (!isOutline && !n) return null;
     if (tb.progress && tb.progress.currentWindow) return tb.progress.currentWindow;
     const prep = tb.prep;
     if (prep && prep.status === 'completed' && Array.isArray(prep.units) && prep.units.length) {
       const covered = new Set(tb.progress.coveredUnitIndices || []);
       const idx = prep.units.findIndex((_, i) => !covered.has(i));
       const unitIndex = idx >= 0 ? idx : prep.units.length - 1;
+      if (isOutline) {
+        return { startChunk: unitIndex, endChunk: unitIndex, unitIndex };
+      }
       const u = prep.units[unitIndex];
       return { startChunk: Math.max(0, u.startChunk || 0), endChunk: Math.min(n - 1, u.endChunk ?? n - 1), unitIndex };
     }
+    if (isOutline) return { startChunk: 0, endChunk: 0, unitIndex: -1 };
     return { startChunk: 0, endChunk: n - 1, unitIndex: -1 };
   }
   function setProgressWindow(tbId, window) {
@@ -159,12 +250,17 @@ window.Store = (function () {
     }
     tb.progress.coveredUnitIndices = Array.from(covered);
     tb.progress.currentUnitIndex = nextIdx;
+    const isOutline = tb.mode === 'outline';
     const n = tb.chunks.length;
     if (nextIdx >= 0 && prep.units[nextIdx]) {
-      const u = prep.units[nextIdx];
-      tb.progress.currentWindow = { startChunk: Math.max(0, u.startChunk || 0), endChunk: Math.min(n - 1, u.endChunk ?? n - 1), unitIndex: nextIdx };
+      if (isOutline) {
+        tb.progress.currentWindow = { startChunk: nextIdx, endChunk: nextIdx, unitIndex: nextIdx };
+      } else {
+        const u = prep.units[nextIdx];
+        tb.progress.currentWindow = { startChunk: Math.max(0, u.startChunk || 0), endChunk: Math.min(n - 1, u.endChunk ?? n - 1), unitIndex: nextIdx };
+      }
     } else if (nextIdx === -1) {
-      tb.progress.currentWindow = { startChunk: 0, endChunk: Math.max(0, n - 1), unitIndex: -1 };
+      tb.progress.currentWindow = { startChunk: 0, endChunk: isOutline ? 0 : Math.max(0, n - 1), unitIndex: -1 };
     }
     save(); return tb.progress;
   }
@@ -353,6 +449,7 @@ window.Store = (function () {
   return {
     getState, getApiConfigRaw, updateApiConfig, updateGlobalPersona,
     createTextbook, updateTextbook, deleteTextbook,
+    parseOutline, createOutlineTextbook, importOutlineToTextbook,
     setPrep, getPrep, updatePrep, cancelPrep, getCurrentWindow, setProgressWindow, advanceProgress,
     getKpStatus, updateKpStatus,
     createCourse, appendDialogue, setSummary, saveCourse, getActiveCourse, clearActiveCourse, deleteCourse,

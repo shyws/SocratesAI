@@ -209,6 +209,20 @@ window.Engine = (function () {
     return copy;
   }
 
+  // 大纲模式（无教材正文）：把"当前单元的大纲内容"拼成锚点文本数组，供提示词作为教材锚点注入。
+  function buildOutlineAnchor(tb, unitIndex) {
+    const prep = tb && tb.prep;
+    if (!prep || !Array.isArray(prep.units)) return [];
+    const ui = (unitIndex != null && unitIndex >= 0) ? unitIndex : 0;
+    const u = prep.units[ui] || prep.units[0];
+    if (!u) return [];
+    const lines = ['单元：' + u.title];
+    if (u.summary) lines.push('单元摘要：' + u.summary);
+    const kps = (prep.knowledgePoints || []).filter((kp) => kp.unitIndex === ui).map((kp) => kp.title);
+    if (kps.length) lines.push('本单元知识点：\n' + kps.map((t) => '· ' + t).join('\n'));
+    return lines;
+  }
+
   /* ---- LLM 调用：有 Key 直连，无 Key / 失败降级 mock ---- */
   async function callLLM(messages, opts = {}) {
     const cfg = Store.getApiConfigRaw();
@@ -236,8 +250,25 @@ window.Engine = (function () {
   }
 
   /* ---- 备课相关（搬运 prep.js） ---- */
-  function formatChunks(chunks, max = MAX_PREP_CHUNKS) {
-    return chunks.slice(0, max).map((c, i) => `片段${i}: ${c.text || c}`).join('\n');
+  function formatChunks(chunks, max = MAX_PREP_CHUNKS, maxCharsPerChunk = 200) {
+    const len = chunks.length;
+    if (!len) return '';
+    // 若片段数超过 max，等距采样，确保模型能看到教材全貌，而不是只读前 max 段。
+    let indices;
+    if (len <= max) {
+      indices = Array.from({ length: len }, (_, i) => i);
+    } else {
+      indices = [];
+      for (let i = 0; i < max; i++) {
+        const idx = Math.min(len - 1, Math.round((i * (len - 1)) / (max - 1)));
+        indices.push(idx);
+      }
+    }
+    return indices.map((idx) => {
+      let text = String(chunks[idx].text || chunks[idx] || '');
+      if (text.length > maxCharsPerChunk) text = text.slice(0, maxCharsPerChunk) + '…';
+      return `片段${idx}: ${text}`;
+    }).join('\n');
   }
   // 只截取 [from, to] 区间的片段，且保留全局序号（片段N），便于模型正确填写 chunkStart/chunkEnd。
   function formatChunksRange(chunks, from, to) {
@@ -319,13 +350,13 @@ window.Engine = (function () {
     }
     Store.updatePrep(textbookId, { status: 'processing', detailLevel, scheduledAt: null, error: null, phase: '第一阶段：划分教学单元与大纲框架…' });
     try {
-      // ===== 第一阶段：单元划分 + 大纲框架（输出量小，不会被截断）=====
-      const chunksText = formatChunks(tb.chunks, MAX_PREP_CHUNKS);
+      // ===== 第一阶段：单元划分 + 大纲框架（等距采样，覆盖全书轮廓）=====
+      const chunksText = formatChunks(tb.chunks, MAX_PREP_CHUNKS, 200);
       const phaseAMessages = [
         { role: 'system', content: P.buildPrepUnitsSystem(detailLevel) },
-        { role: 'user', content: `以下是一本教材的连续片段（共 ${totalChunks} 段，本次分析前 ${Math.min(totalChunks, MAX_PREP_CHUNKS)} 段），请按知识点划分为教学单元并生成大纲框架，输出 JSON：\n\n${chunksText}` },
+        { role: 'user', content: `以下是一本教材的连续片段（共 ${totalChunks} 段）。为覆盖全书结构，本次分析从全书等距采样 ${Math.min(totalChunks, MAX_PREP_CHUNKS)} 段（每段截断至 200 字以内）。请按知识点划分为教学单元并生成大纲框架，输出 JSON：\n\n${chunksText}` },
       ];
-      const { content: contentA, provider: providerA } = await callLLM(phaseAMessages, { task: 'prep', temperature: 0.35, max_tokens: 3000, failLoud: true });
+      const { content: contentA, provider: providerA } = await callLLM(phaseAMessages, { task: 'prep', temperature: 0.35, max_tokens: 4000, failLoud: true });
       if (providerA === 'mock') {
         throw new Error('未配置 API Key 或 API 调用失败，无法备课。请检查「设置」中的 API Key 和网络连接。');
       }
@@ -351,6 +382,8 @@ window.Engine = (function () {
       }
 
       // ===== 第二阶段：按单元分批补充知识点（每批输出量小，避免截断）=====
+      const TARGET_TOTAL_KPS = 100;
+      const MIN_KPS = 90;
       const BATCH = 4;
       const allKPs = [];
       let globalKpIdx = 0;
@@ -362,7 +395,7 @@ window.Engine = (function () {
         const rangeText = formatChunksRange(tb.chunks, from, to);
         Store.updatePrep(textbookId, { phase: `第二阶段：补充知识点（${Math.min(b + BATCH, units.length)}/${units.length} 单元）…` });
         const batchMessages = [
-          { role: 'system', content: P.buildPrepKnowledgePointsSystem(detailLevel) },
+          { role: 'system', content: P.buildPrepKnowledgePointsSystem(detailLevel, { totalUnits: units.length, batchUnitCount: batch.length, targetTotalKPs: TARGET_TOTAL_KPS }) },
           { role: 'user', content: `下方 units 是教材中的一批单元（unitIndex 为全局下标）。请只针对这些单元，依据对应教材片段提取知识点，输出 JSON：\n\n【units】\n${batchText}\n\n【教材片段（全局序号 片段${from}~片段${to}）】\n${rangeText}` },
         ];
         const { content: contentB, provider: providerB } = await callLLM(batchMessages, { task: 'prep', temperature: 0.35, max_tokens: 4000, failLoud: true });
@@ -386,6 +419,9 @@ window.Engine = (function () {
       }
       if (!allKPs.length) {
         throw new Error('AI 未返回任何知识点，请检查教材内容后重新备课（可尝试调高备课详细度）。');
+      }
+      if (allKPs.length < MIN_KPS) {
+        console.warn(`[Engine] 知识点数量不足：实际 ${allKPs.length}，目标 ${TARGET_TOTAL_KPS}。已保存结果，但建议调高备课详细度或重新备课。`);
       }
       // 把知识点总览追加进大纲，确保大纲覆盖全部知识点
       syllabus += '\n\n## 知识点总览（按单元）\n\n';
@@ -415,16 +451,19 @@ window.Engine = (function () {
       : ((tb && tb.personaOverride && tb.personaOverride.trim()) || (s.learner.globalPersona || ''));
     const progress = tb ? tb.progress : null;
     const tbHasImages = !!(tb && tb.hasImages);
+    const isOutline = !!(tb && tb.mode === 'outline');
     const currentWindow = (course && course.currentWindow) || (tb ? Store.getCurrentWindow(tb) : null);
     const allChunks = tb ? tb.chunks.map((c) => c.text) : [];
     let win = null;
     if (currentWindow && currentWindow.startChunk != null && currentWindow.endChunk != null) win = { start: currentWindow.startChunk, end: currentWindow.endChunk };
-    // RAG 检索：在教材窗口 [start,end] 内取与问题最相关的 top-3 片段（向量优先，失败自动回退词频）
-    const anchor = await retrieve(allChunks, message, 3, { tb, start: win ? win.start : 0, end: win ? win.end : Math.max(0, allChunks.length - 1) });
+    // 大纲模式：没有正文，锚点直接用当前单元的大纲内容；否则走 RAG 检索。
+    const winUnitIndex = (currentWindow && currentWindow.unitIndex != null && currentWindow.unitIndex >= 0) ? currentWindow.unitIndex : 0;
+    const outlineAnchor = isOutline ? buildOutlineAnchor(tb, winUnitIndex) : null;
+    const anchor = isOutline ? outlineAnchor : await retrieve(allChunks, message, 3, { tb, start: win ? win.start : 0, end: win ? win.end : Math.max(0, allChunks.length - 1) });
     // 稳定系统提示（规则+人设+进度+媒介）放最前 → DeepSeek/OpenAI 前缀缓存命中（1/10 价）
-    const stableSystem = P.buildSystemPrompt({ personaText, progress, textbookHasImages: tbHasImages });
+    const stableSystem = P.buildSystemPrompt({ personaText, progress, textbookHasImages: tbHasImages, outlineContent: isOutline ? outlineAnchor : null });
     const messages = [{ role: 'system', content: stableSystem }];
-    const anchorText = P.buildAnchorPrompt(anchor);
+    const anchorText = P.buildAnchorPrompt(anchor, isOutline ? outlineAnchor : null);
     if (anchorText) messages.push({ role: 'system', content: anchorText });
     const history = course ? course.dialogues.slice(-8) : [];
     messages.push(...history, { role: 'user', content: message });
@@ -455,11 +494,19 @@ window.Engine = (function () {
     }
     const currentWindow = Store.getCurrentWindow(tb);
     const windowCtx = enrichWindow(currentWindow, tb);
-    const allTexts = tb.chunks.map((c) => c.text);
-    let windowTexts = allTexts;
-    if (currentWindow && currentWindow.startChunk != null && currentWindow.endChunk != null) windowTexts = allTexts.slice(currentWindow.startChunk, currentWindow.endChunk + 1);
-    const chunks = windowTexts.slice(0, 8);
-    const system = P.buildLessonPrompt({ personaText, textbookChunks: chunks, pendingQuestion: pendQ, textbookHasImages: !!tb.hasImages, currentWindow: windowCtx });
+    const isOutline = tb.mode === 'outline';
+    let chunks = [];
+    let outlineContent = null;
+    if (isOutline) {
+      const ui = (currentWindow && currentWindow.unitIndex != null && currentWindow.unitIndex >= 0) ? currentWindow.unitIndex : 0;
+      outlineContent = buildOutlineAnchor(tb, ui);
+    } else {
+      const allTexts = tb.chunks.map((c) => c.text);
+      let windowTexts = allTexts;
+      if (currentWindow && currentWindow.startChunk != null && currentWindow.endChunk != null) windowTexts = allTexts.slice(currentWindow.startChunk, currentWindow.endChunk + 1);
+      chunks = windowTexts.slice(0, 8);
+    }
+    const system = P.buildLessonPrompt({ personaText, textbookChunks: chunks, pendingQuestion: pendQ, textbookHasImages: !!tb.hasImages, currentWindow: windowCtx, outlineContent, outlineMode: isOutline });
     const messages = [
       { role: 'system', content: system },
       { role: 'user', content: pendQ
@@ -486,7 +533,7 @@ window.Engine = (function () {
     const windowCtx = enrichWindow(currentWindow, tb);
     const lastQuestion = cleanPending(course.lastQuestion || '');
     const messages = [
-      { role: 'system', content: P.buildSummarySystem({ currentWindow: windowCtx, lastQuestion }) },
+      { role: 'system', content: P.buildSummarySystem({ currentWindow: windowCtx, lastQuestion, outlineMode: !!(tb && tb.mode === 'outline') }) },
       ...course.dialogues.map((d) => ({ role: d.role, content: d.content })),
     ];
     const { content, provider } = await callLLM(messages, { task: 'summary', temperature: 0.3, max_tokens: 1500 });
@@ -538,7 +585,7 @@ window.Engine = (function () {
     const recentDialogues = (course.dialogues || []).slice(-24);
     const cleanedDialogues = recentDialogues.map((d) => ({ role: d.role, content: cleanForReview(d.content || '') }));
     const messages = [
-      { role: 'system', content: P.buildFlashcardSystem({ currentWindow: windowCtx, targetCount }) },
+      { role: 'system', content: P.buildFlashcardSystem({ currentWindow: windowCtx, targetCount, outlineMode: !!(tb && tb.mode === 'outline') }) },
       ...cleanedDialogues,
     ];
     if (course.summary) messages.push({ role: 'assistant', content: '本次总结：' + JSON.stringify(course.summary) });
@@ -597,11 +644,13 @@ window.Engine = (function () {
       });
       // 当前窗口内的未匹配KP标记为unlearned
       const win = course.currentWindow || Store.getCurrentWindow(tb);
+      const isOutline = tb.mode === 'outline';
       if (win && win.startChunk != null) {
         kps.forEach((kp) => {
-          if (kp.chunkStart >= win.startChunk - 2 && kp.chunkStart <= (win.endChunk || win.startChunk) + 2) {
-            if (!kpStatusUpdates[kp.id]) kpStatusUpdates[kp.id] = 'unlearned';
-          }
+          const inWindow = isOutline
+            ? (kp.unitIndex === win.unitIndex)
+            : (kp.chunkStart >= win.startChunk - 2 && kp.chunkStart <= (win.endChunk || win.startChunk) + 2);
+          if (inWindow && !kpStatusUpdates[kp.id]) kpStatusUpdates[kp.id] = 'unlearned';
         });
       }
       if (Object.keys(kpStatusUpdates).length) Store.updateKpStatus(textbookId, kpStatusUpdates);

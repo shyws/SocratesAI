@@ -292,6 +292,7 @@ async function renderTextbooks() {
       <button class="ghost src-tab active" data-tab="paste">粘贴文本</button>
       <button class="ghost src-tab" data-tab="file">上传 PDF 文件</button>
       <button class="ghost src-tab" data-tab="url">网页链接</button>
+      <button class="ghost src-tab" data-tab="outline">导入大纲（无教材）</button>
     </div>
     <div id="pane-file" style="display:none">
       <input type="file" id="nt-file" accept=".pdf,.png,.jpg,.jpeg,.gif,.bmp,.webp,.txt,.md" />
@@ -301,19 +302,36 @@ async function renderTextbooks() {
       <div class="row"><input id="nt-url" placeholder="https://..." /><button id="nt-fetch" class="ghost">抓取正文</button></div>
       <div class="muted" id="nt-url-msg">浏览器直接抓取网页正文；多数站点会因跨域(CORS)被拦，失败请手动复制正文粘贴。</div>
     </div>
+    <div id="pane-outline" style="display:none">
+      <div class="muted" style="margin-bottom:6px">适用于「没有教材正文、只有一份三级知识点大纲」的场景。导入后可直接上课、生成闪卡与进度跟踪，无需原文。</div>
+      <label>三级大纲（Markdown：## 单元 → ### 小节 → - 知识点）</label>
+      <textarea id="nt-outline" style="min-height:180px" placeholder="## 第一单元 函数与极限
+### 1.1 函数概念
+- 函数的定义与记号
+- 定义域与值域
+### 1.2 极限
+- 极限的 ε-δ 定义
+- 左极限与右极限
+## 第二单元 导数
+### 2.1 导数定义
+- 导数的几何意义
+- 可导与连续的关系"></textarea>
+      <div class="muted" style="margin-top:6px">说明：单元（##）、小节（###）用于组织；每个 <code>-</code> 知识点会被拆成可跟踪的「知识点格」。大纲将作为上课的教材锚点。</div>
+    </div>
     <label style="margin-top:10px">教材正文（粘贴，或经上方上传 / 抓取自动填入；可再手动润色）</label>
     <textarea id="nt-text" placeholder="例如：牛顿第二定律 F=ma 表明物体加速度与合外力成正比，与质量成反比……"></textarea>
     <label style="margin-top:8px">本教材人设（可选，创建后覆盖全局默认人设）</label>
     <textarea id="nt-persona" placeholder="如：用严谨推导风，多追问公式来源；留空则沿用全局默认人设"></textarea>
-    <div class="row" style="margin-top:10px"><button id="nt-save">创建并切片</button><span class="muted" id="nt-msg"></span></div>
+    <div class="row" style="margin-top:10px"><button id="nt-save">创建并切片</button><button id="nt-save-outline" class="ghost" style="display:none">导入大纲</button><span class="muted" id="nt-msg"></span></div>
   </div>`;
   const dueMap = {};
   Store.dueByTextbook().forEach((d) => { dueMap[d.textbookId] = d; });
   state.textbooks.forEach((tb) => {
     const d = dueMap[tb.id];
+    const isOutline = tb.mode === 'outline';
     html += `<div class="item">
-      <div><div class="title">《${esc(tb.title)}》</div>
-      <div class="meta">切片 ${tb.chunks.length} 段 ｜ 课程 ${tb.courses.length} ｜ 阶段 ${tb.progress.stage}${tb.personaOverride ? ' ｜ 专用人设' : ''}</div>${d && d.due > 0 ? `<div class="meta" style="margin-top:4px"><span class="pill warn">🔴 ${d.due} 张待复习</span></div>` : ''}</div>
+      <div><div class="title">《${esc(tb.title)}》${isOutline ? ' <span class="pill">🗂 大纲模式</span>' : ''}</div>
+      <div class="meta">${isOutline ? `大纲 ${tb.prep && tb.prep.units ? tb.prep.units.length : 0} 单元${(tb.prep && Array.isArray(tb.prep.knowledgePoints)) ? ` · ${tb.prep.knowledgePoints.length} 知识点` : ''}` : `切片 ${tb.chunks.length} 段`} ｜ 课程 ${tb.courses.length} ｜ 阶段 ${tb.progress.stage}${tb.personaOverride ? ' ｜ 专用人设' : ''}</div>${d && d.due > 0 ? `<div class="meta" style="margin-top:4px"><span class="pill warn">🔴 ${d.due} 张待复习</span></div>` : ''}</div>
       <div class="spacer"></div>
       <a class="btn ghost" href="#/textbooks/${tb.id}">打开</a>
       <button class="btn danger" data-del="${tb.id}">删除</button>
@@ -326,6 +344,10 @@ async function renderTextbooks() {
     currentTab = tab;
     $('#pane-file').style.display = tab === 'file' ? 'block' : 'none';
     $('#pane-url').style.display = tab === 'url' ? 'block' : 'none';
+    $('#pane-outline').style.display = tab === 'outline' ? 'block' : 'none';
+    $('#nt-text').parentElement.style.display = tab === 'outline' ? 'none' : 'block';
+    $('#nt-save').style.display = tab === 'outline' ? 'none' : 'inline-block';
+    $('#nt-save-outline').style.display = tab === 'outline' ? 'inline-block' : 'none';
     $all('.src-tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
   };
   $all('.src-tab').forEach((b) => b.onclick = () => showTab(b.dataset.tab));
@@ -382,6 +404,20 @@ async function renderTextbooks() {
     $('#nt-msg').textContent = '已创建';
     renderTextbooks();
   };
+  $('#nt-save-outline').onclick = async () => {
+    const title = $('#nt-title').value.trim();
+    const outline = $('#nt-outline').value;
+    if (!title) return ($('#nt-msg').textContent = '请填写大纲名称');
+    if (!outline || !outline.trim()) return ($('#nt-msg').textContent = '请粘贴三级大纲（## 单元 → ### 小节 → - 知识点）');
+    try {
+      const tb = Store.createOutlineTextbook({ title, outline, personaOverride: $('#nt-persona').value });
+      $('#nt-title').value = ''; $('#nt-outline').value = ''; $('#nt-persona').value = '';
+      $('#nt-msg').textContent = '已导入大纲';
+      location.hash = `#/textbooks/${tb.id}`;
+    } catch (e) {
+      $('#nt-msg').textContent = '导入失败：' + e.message;
+    }
+  };
   $all('[data-del]').forEach((b) => b.onclick = async () => {
     if (!confirm('确认删除该教材及其所有课程？')) return;
     Store.deleteTextbook(b.dataset.del);
@@ -398,16 +434,19 @@ async function renderTextbook(tbId) {
   Store.dueByTextbook().forEach((x) => { dueMap[x.textbookId] = x; });
   const tbDue = dueMap[tbId];
   const prep = tb.prep;
+  const isOutline = tb.mode === 'outline';
   const prepStatusText = !prep
     ? '尚未备课。建议先对教材做整体梳理，AI 会按知识点划分单元并跟踪进度。'
     : prep.status === 'processing'
       ? (prep.phase ? `正在备课中：${prep.phase}` : '正在备课中，请稍候…')
       : prep.status === 'error'
         ? `备课失败：${prep.error || '未知错误'}。请检查 API Key 与网络后重试，或清除备课后重新点击「立即备课」。`
-        : `备课完成（${prep.detailLevel} 档），共 ${(prep.units || []).length} 个单元${Array.isArray(prep.knowledgePoints) && prep.knowledgePoints.length ? ` · ${prep.knowledgePoints.length} 个知识点` : ''} · ${new Date(prep.completedAt).toLocaleString()}`;
+        : isOutline
+          ? `已导入三级大纲（无教材正文），共 ${(prep.units || []).length} 个单元${Array.isArray(prep.knowledgePoints) && prep.knowledgePoints.length ? ` · ${prep.knowledgePoints.length} 个知识点` : ''}。可直接新建课程上课；大纲将作为上课的教材锚点。`
+          : `备课完成（${prep.detailLevel} 档），共 ${(prep.units || []).length} 个单元${Array.isArray(prep.knowledgePoints) && prep.knowledgePoints.length ? ` · ${prep.knowledgePoints.length} 个知识点` : ''} · ${new Date(prep.completedAt).toLocaleString()}`;
 
   let html = `<div class="row"><a class="btn ghost" href="#/textbooks">← 教材库</a><div class="spacer"></div></div>
-  <h2>《${esc(tb.title)}》</h2>
+  <h2>《${esc(tb.title)}》${isOutline ? ' <span class="pill">🗂 大纲模式（无教材正文）</span>' : ''}</h2>
   ${tbDue && tbDue.due > 0 ? `<div class="review-reminder">🔔 本教材有 <b>${tbDue.due}</b> 张闪卡已到期待复习（共 ${tbDue.total} 张）。进入任意课程的「总结/闪卡」页点「开始复习」即可巩固。</div>` : ''}
   <div class="card">
     <h3>每教材人设覆盖（可选，覆盖全局默认人设）</h3>
@@ -418,18 +457,28 @@ async function renderTextbook(tbId) {
     <h3>📐 备课与教材进度</h3>
     <div class="muted" style="margin-bottom:10px">${prepStatusText}</div>
     ${renderProgressGrid(tb)}
-    <div id="prep-controls" class="row" style="margin-top:12px;align-items:flex-end">
-      <div>
-        <label style="margin-top:0">备课详细度</label>
-        <select id="prep-level">
-          <option value="1">1 精简：标题 + 核心知识点</option>
-          <option value="2" selected>2 标准：标题 + 摘要 + 知识点关系</option>
-          <option value="3">3 详细：含定义、易错点、示例</option>
-        </select>
-      </div>
-      <button id="prep-now">立即备课</button>
-      ${prep && prep.status === 'completed' ? `<button id="prep-reset" class="ghost">清除备课</button>` : ''}
-    </div>
+    ${isOutline
+      ? `<div id="prep-controls" class="row" style="margin-top:12px;align-items:flex-start">
+          <div class="muted" style="flex:1">本教材由导入的三级大纲构成，无需 AI 备课。可新建课程直接上课；如需调整结构，点击「重新导入大纲」。</div>
+          <button id="reimport-outline" class="ghost">重新导入大纲</button>
+        </div>
+        <div id="reimport-pane" style="display:none;margin-top:10px">
+          <label>三级大纲（Markdown：## 单元 → ### 小节 → - 知识点）</label>
+          <textarea id="re-outline" style="min-height:160px">${esc((prep && prep.syllabus) || '')}</textarea>
+          <div class="row" style="margin-top:8px"><button id="reimport-save">保存大纲</button><button id="reimport-cancel" class="ghost">取消</button><span class="muted" id="reimport-msg"></span></div>
+        </div>`
+      : `<div id="prep-controls" class="row" style="margin-top:12px;align-items:flex-end">
+        <div>
+          <label style="margin-top:0">备课详细度</label>
+          <select id="prep-level">
+            <option value="1">1 精简：标题 + 核心知识点</option>
+            <option value="2" selected>2 标准：标题 + 摘要 + 知识点关系</option>
+            <option value="3">3 详细：含定义、易错点、示例</option>
+          </select>
+        </div>
+        <button id="prep-now">立即备课</button>
+        ${prep && prep.status === 'completed' ? `<button id="prep-reset" class="ghost">清除备课</button>` : ''}
+      </div>`}
     <div id="prep-msg" class="muted" style="margin-top:8px"></div>
     <div id="prep-units" style="margin-top:10px"></div>
   </div>
@@ -468,7 +517,7 @@ async function renderTextbook(tbId) {
     let html = `<details open><summary>查看 ${prep.units.length} 个知识单元${kpCount ? `（共 ${kpCount} 个知识点）` : ''}</summary>` +
       prep.units.map((u, i) => `
         <div class="unit-item">
-          <div class="row"><b>单元 ${i + 1}：${esc(u.title)}</b><span class="muted">片段 ${u.startChunk}~${u.endChunk}</span></div>
+          <div class="row"><b>单元 ${i + 1}：${esc(u.title)}</b><span class="muted">${isOutline ? `第 ${i + 1} 单元（大纲模式）` : `片段 ${u.startChunk}~${u.endChunk}`}</span></div>
           <div class="muted">${renderMD(u.summary || '')}</div>
         </div>`).join('') +
       `</details>`;
@@ -500,6 +549,30 @@ async function renderTextbook(tbId) {
       if (!confirm('清除备课单元与进度？教材正文与课程保持不变。')) return;
       Store.cancelPrep(tbId);
       renderTextbook(tbId);
+    };
+  }
+
+  // 大纲模式：重新导入大纲
+  const reimportBtn = $('#reimport-outline');
+  if (reimportBtn) {
+    reimportBtn.onclick = () => {
+      $('#reimport-pane').style.display = 'block';
+      $('#reimport-outline').style.display = 'none';
+    };
+    $('#reimport-cancel').onclick = () => {
+      $('#reimport-pane').style.display = 'none';
+      $('#reimport-outline').style.display = 'inline-block';
+    };
+    $('#reimport-save').onclick = async () => {
+      const outline = $('#re-outline').value;
+      if (!outline || !outline.trim()) return ($('#reimport-msg').textContent = '请粘贴三级大纲');
+      try {
+        Store.importOutlineToTextbook(tbId, { title: tb.title, outline });
+        $('#reimport-msg').textContent = '已更新大纲';
+        renderTextbook(tbId);
+      } catch (e) {
+        $('#reimport-msg').textContent = '导入失败：' + e.message;
+      }
     };
   }
 
