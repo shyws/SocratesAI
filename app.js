@@ -287,7 +287,7 @@ async function renderTextbooks() {
   <div class="card">
     <h3>新建教材</h3>
     <label>教材名称</label><input id="nt-title" placeholder="如：高中物理" />
-    <label>教材来源（三选一：粘贴文本 / 上传 PDF / 网页链接）</label>
+    <label>教材来源（四选一：粘贴文本 / 上传 PDF / 网页链接 / 导入大纲）</label>
     <div class="row src-tabs">
       <button class="ghost src-tab active" data-tab="paste">粘贴文本</button>
       <button class="ghost src-tab" data-tab="file">上传 PDF 文件</button>
@@ -318,8 +318,10 @@ async function renderTextbooks() {
 - 可导与连续的关系"></textarea>
       <div class="muted" style="margin-top:6px">说明：单元（##）、小节（###）用于组织；每个 <code>-</code> 知识点会被拆成可跟踪的「知识点格」。大纲将作为上课的教材锚点。</div>
     </div>
-    <label style="margin-top:10px">教材正文（粘贴，或经上方上传 / 抓取自动填入；可再手动润色）</label>
-    <textarea id="nt-text" placeholder="例如：牛顿第二定律 F=ma 表明物体加速度与合外力成正比，与质量成反比……"></textarea>
+    <div id="pane-paste">
+      <label style="margin-top:10px">教材正文（粘贴，或经上方上传 / 抓取自动填入；可再手动润色）</label>
+      <textarea id="nt-text" placeholder="例如：牛顿第二定律 F=ma 表明物体加速度与合外力成正比，与质量成反比……"></textarea>
+    </div>
     <label style="margin-top:8px">本教材人设（可选，创建后覆盖全局默认人设）</label>
     <textarea id="nt-persona" placeholder="如：用严谨推导风，多追问公式来源；留空则沿用全局默认人设"></textarea>
     <div class="row" style="margin-top:10px"><button id="nt-save">创建并切片</button><button id="nt-save-outline" class="ghost" style="display:none">导入大纲</button><span class="muted" id="nt-msg"></span></div>
@@ -345,7 +347,7 @@ async function renderTextbooks() {
     $('#pane-file').style.display = tab === 'file' ? 'block' : 'none';
     $('#pane-url').style.display = tab === 'url' ? 'block' : 'none';
     $('#pane-outline').style.display = tab === 'outline' ? 'block' : 'none';
-    $('#nt-text').parentElement.style.display = tab === 'outline' ? 'none' : 'block';
+    $('#pane-paste').style.display = tab === 'outline' ? 'none' : 'block';
     $('#nt-save').style.display = tab === 'outline' ? 'none' : 'inline-block';
     $('#nt-save-outline').style.display = tab === 'outline' ? 'inline-block' : 'none';
     $all('.src-tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
