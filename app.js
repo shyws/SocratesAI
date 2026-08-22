@@ -551,14 +551,17 @@ async function renderTextbook(tbId) {
   };
   renderUnits();
 
-  $('#prep-now').onclick = async () => {
-    const btn = $('#prep-now'); btn.disabled = true; $('#prep-msg').textContent = '正在备课，请稍候…';
-    try {
-      await Engine.prepareNow(tbId, Number($('#prep-level').value));
-      $('#prep-msg').textContent = '备课完成';
-      renderTextbook(tbId);
-    } catch (e) { $('#prep-msg').textContent = '备课失败：' + e.message; btn.disabled = false; }
-  };
+  const prepNowBtn = $('#prep-now');
+  if (prepNowBtn) {
+    prepNowBtn.onclick = async () => {
+      prepNowBtn.disabled = true; $('#prep-msg').textContent = '正在备课，请稍候…';
+      try {
+        await Engine.prepareNow(tbId, Number($('#prep-level').value));
+        $('#prep-msg').textContent = '备课完成';
+        renderTextbook(tbId);
+      } catch (e) { $('#prep-msg').textContent = '备课失败：' + e.message; prepNowBtn.disabled = false; }
+    };
+  }
   const resetBtn = $('#prep-reset');
   if (resetBtn) {
     resetBtn.onclick = async () => {
