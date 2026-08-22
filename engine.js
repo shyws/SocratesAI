@@ -239,6 +239,14 @@ window.Engine = (function () {
   function formatChunks(chunks, max = MAX_PREP_CHUNKS) {
     return chunks.slice(0, max).map((c, i) => `片段${i}: ${c.text || c}`).join('\n');
   }
+  // 只截取 [from, to] 区间的片段，且保留全局序号（片段N），便于模型正确填写 chunkStart/chunkEnd。
+  function formatChunksRange(chunks, from, to) {
+    const out = [];
+    for (let i = Math.max(0, from); i <= to && i < chunks.length; i++) {
+      out.push(`片段${i}: ${chunks[i].text || chunks[i]}`);
+    }
+    return out.join('\n');
+  }
   function normalizeUnits(units, totalChunks) {
     if (!Array.isArray(units) || !units.length) return [];
     const out = units.map((u) => ({
@@ -309,63 +317,90 @@ window.Engine = (function () {
     if (!cfg || !cfg.apiKey || !cfg.apiKey.trim()) {
       throw new Error('未配置 API Key，无法备课。请先在「设置」页填写 DeepSeek API Key。');
     }
-    Store.updatePrep(textbookId, { status: 'processing', detailLevel, scheduledAt: null, error: null });
-    const chunksText = formatChunks(tb.chunks, MAX_PREP_CHUNKS);
-    const messages = [
-      { role: 'system', content: P.buildPrepSystem(detailLevel) },
-      { role: 'user', content: `以下是一本教材的连续片段（共 ${totalChunks} 段，本次分析前 ${Math.min(totalChunks, MAX_PREP_CHUNKS)} 段），请按知识点划分为教学单元、细分100个知识点并生成教学大纲，输出 JSON：\n\n${chunksText}` },
-    ];
+    Store.updatePrep(textbookId, { status: 'processing', detailLevel, scheduledAt: null, error: null, phase: '第一阶段：划分教学单元与大纲框架…' });
     try {
-      const { content, provider } = await callLLM(messages, { task: 'prep', temperature: 0.35, max_tokens: 4000, failLoud: true });
-      if (provider === 'mock') {
+      // ===== 第一阶段：单元划分 + 大纲框架（输出量小，不会被截断）=====
+      const chunksText = formatChunks(tb.chunks, MAX_PREP_CHUNKS);
+      const phaseAMessages = [
+        { role: 'system', content: P.buildPrepUnitsSystem(detailLevel) },
+        { role: 'user', content: `以下是一本教材的连续片段（共 ${totalChunks} 段，本次分析前 ${Math.min(totalChunks, MAX_PREP_CHUNKS)} 段），请按知识点划分为教学单元并生成大纲框架，输出 JSON：\n\n${chunksText}` },
+      ];
+      const { content: contentA, provider: providerA } = await callLLM(phaseAMessages, { task: 'prep', temperature: 0.35, max_tokens: 3000, failLoud: true });
+      if (providerA === 'mock') {
         throw new Error('未配置 API Key 或 API 调用失败，无法备课。请检查「设置」中的 API Key 和网络连接。');
       }
-      const parsed = parseJSON(content) || {};
-      const units = normalizeUnits((parsed && parsed.units) || [], totalChunks);
+      const parsedA = parseJSON(contentA) || {};
+      const units = normalizeUnits((parsedA && parsedA.units) || [], totalChunks);
       if (!units.length) {
-        const preview = String(content || '').replace(/\s+/g, ' ').slice(0, 300);
-        console.warn('[Engine] 备课解析失败，原始响应前 300 字：', preview);
-        throw new Error(`AI 返回的备课结果无法解析出有效的单元划分。响应片段：${preview || '（空）'}`);
+        const raw = String(contentA || '');
+        const preview = raw.replace(/\s+/g, ' ').slice(0, 300);
+        console.warn('[Engine] 单元划分失败，原始响应前 300 字：', preview);
+        const openCount = (raw.match(/{/g) || []).length;
+        const closeCount = (raw.match(/}/g) || []).length;
+        if (openCount > closeCount) {
+          throw new Error(`单元划分结果被截断/不完整（很可能是 max_tokens 不足或教材过长导致 JSON 没输出完）。响应片段：${preview || '（空）'}。建议：把「备课详细度」降到 1 档，或将长教材拆分为更小的分册后再备课。`);
+        }
+        throw new Error(`单元划分结果无法解析出有效的单元（格式异常或非 JSON）。响应片段：${preview || '（空）'}`);
       }
-      // 解析知识点列表
-      let knowledgePoints = [];
-      if (Array.isArray(parsed.knowledgePoints) && parsed.knowledgePoints.length) {
-        knowledgePoints = parsed.knowledgePoints.map((kp, idx) => ({
-          id: String(kp.id || `kp_${String(idx + 1).padStart(3, '0')}`),
-          title: String(kp.title || `知识点 ${idx + 1}`).trim(),
-          unitIndex: Math.max(0, parseInt(kp.unitIndex, 10) || 0),
-          chunkStart: Math.max(0, parseInt(kp.chunkStart, 10) || 0),
-          chunkEnd: Math.max(0, parseInt(kp.chunkEnd, 10) || (totalChunks - 1)),
-        }));
+      let syllabus = '';
+      if (typeof parsedA.syllabus === 'string' && parsedA.syllabus.trim()) {
+        syllabus = parsedA.syllabus.trim();
       }
-      // 如果没有获取到知识点，从 units 的 knowledgePoints 扁平化生成
-      if (!knowledgePoints.length && units.length) {
-        let kpIdx = 0;
-        units.forEach((u, ui) => {
-          (u.knowledgePoints || []).forEach((kpTitle) => {
-            knowledgePoints.push({
-              id: `kp_${String(kpIdx + 1).padStart(3, '0')}`,
-              title: String(kpTitle).trim(),
-              unitIndex: ui,
-              chunkStart: u.startChunk || 0,
-              chunkEnd: u.endChunk || (totalChunks - 1),
-            });
-            kpIdx++;
+      if (!syllabus) {
+        syllabus = '# 教材教学大纲\n\n' + units.map((u, i) => `## 第${i + 1}章 ${u.title}\n\n${u.summary || '(暂无摘要)'}`).join('\n\n');
+      }
+
+      // ===== 第二阶段：按单元分批补充知识点（每批输出量小，避免截断）=====
+      const BATCH = 4;
+      const allKPs = [];
+      let globalKpIdx = 0;
+      for (let b = 0; b < units.length; b += BATCH) {
+        const batch = units.slice(b, b + BATCH);
+        const from = Math.min.apply(null, batch.map((u) => u.startChunk));
+        const to = Math.max.apply(null, batch.map((u) => u.endChunk));
+        const batchText = batch.map((u, k) => `单元${b + k}（unitIndex=${b + k}）: ${u.title}\n摘要: ${u.summary}\nstartChunk=${u.startChunk}, endChunk=${u.endChunk}`).join('\n\n');
+        const rangeText = formatChunksRange(tb.chunks, from, to);
+        Store.updatePrep(textbookId, { phase: `第二阶段：补充知识点（${Math.min(b + BATCH, units.length)}/${units.length} 单元）…` });
+        const batchMessages = [
+          { role: 'system', content: P.buildPrepKnowledgePointsSystem(detailLevel) },
+          { role: 'user', content: `下方 units 是教材中的一批单元（unitIndex 为全局下标）。请只针对这些单元，依据对应教材片段提取知识点，输出 JSON：\n\n【units】\n${batchText}\n\n【教材片段（全局序号 片段${from}~片段${to}）】\n${rangeText}` },
+        ];
+        const { content: contentB, provider: providerB } = await callLLM(batchMessages, { task: 'prep', temperature: 0.35, max_tokens: 4000, failLoud: true });
+        if (providerB === 'mock') {
+          throw new Error('未配置 API Key 或 API 调用失败，无法备课。请检查「设置」中的 API Key 和网络连接。');
+        }
+        const parsedB = parseJSON(contentB) || {};
+        const kps = Array.isArray(parsedB.knowledgePoints) ? parsedB.knowledgePoints : [];
+        kps.forEach((kp) => {
+          if (!kp || !kp.title || !String(kp.title).trim()) return;
+          const ui = Math.max(0, Math.min(units.length - 1, parseInt(kp.unitIndex, 10) || 0));
+          allKPs.push({
+            id: `kp_${String(globalKpIdx + 1).padStart(3, '0')}`,
+            title: String(kp.title).trim(),
+            unitIndex: ui,
+            chunkStart: Math.max(0, Math.min(totalChunks - 1, parseInt(kp.chunkStart, 10) || units[ui].startChunk)),
+            chunkEnd: Math.max(0, Math.min(totalChunks - 1, parseInt(kp.chunkEnd, 10) || units[ui].endChunk)),
           });
+          globalKpIdx++;
         });
       }
-      // 解析教学大纲
-      let syllabus = '';
-      if (typeof parsed.syllabus === 'string' && parsed.syllabus.trim()) {
-        syllabus = parsed.syllabus.trim();
+      if (!allKPs.length) {
+        throw new Error('AI 未返回任何知识点，请检查教材内容后重新备课（可尝试调高备课详细度）。');
       }
-      if (!syllabus) syllabus = generateMockSyllabus(units);
-      const prep = { status: 'completed', detailLevel, units, knowledgePoints, syllabus, completedAt: new Date().toISOString(), error: null };
+      // 把知识点总览追加进大纲，确保大纲覆盖全部知识点
+      syllabus += '\n\n## 知识点总览（按单元）\n\n';
+      units.forEach((u, i) => {
+        syllabus += `### 第${i + 1}章 ${u.title}\n\n`;
+        allKPs.filter((kp) => kp.unitIndex === i).forEach((kp) => { syllabus += `- ${kp.title}\n`; });
+        syllabus += '\n';
+      });
+
+      const prep = { status: 'completed', detailLevel, units, knowledgePoints: allKPs, syllabus, completedAt: new Date().toISOString(), error: null, phase: null };
       Store.setPrep(textbookId, prep);
       Store.setProgressWindow(textbookId, Store.getCurrentWindow(tb));
       return prep;
     } catch (e) {
-      Store.updatePrep(textbookId, { status: 'error', error: e.message, completedAt: null });
+      Store.updatePrep(textbookId, { status: 'error', error: e.message, completedAt: null, phase: null });
       throw e;
     }
   }

@@ -51,21 +51,22 @@ window.SPROMPTS = (function () {
       textbookChunks.map((c, i) => `片段${i + 1}: ${c}`).join('\n');
   }
 
-  function buildPrepSystem(detailLevel = 2) {
+  // 两阶段备课提示词。
+  // 第一阶段 buildPrepUnitsSystem：只产出「单元划分 + 大纲框架」，输出量小、不会被截断。
+  // 第二阶段 buildPrepKnowledgePointsSystem：只为给定的一批单元补充知识点，输出量小、避免截断。
+  // （历史教训：曾一次性要求模型输出 100 个知识点 + 单元 + 三级大纲，中文输出极易超过 max_tokens 被截断，
+  //  导致 JSON 未闭合、解析失败。拆分为两阶段后，单次输出始终可控。）
+  function buildPrepUnitsSystem(detailLevel = 2) {
     const levelMap = {
-      1: '精简：每个单元只需标题 + 一句话摘要 + 3~5 个核心知识点名称，不展开解释。',
-      2: '标准：每个单元包含标题 + 2~3 句话摘要 + 5~8 个知识点，并说明它们之间的层级或先后关系。',
-      3: '详细：每个单元包含标题 + 详细摘要（含定义、关键公式/原理、易混淆点、典型例子） + 8 个以上知识点，足以直接用于备课。',
+      1: '精简：每个单元只需标题 + 一句话摘要。',
+      2: '标准：每个单元包含标题 + 2~3 句话摘要，并说明单元内的小节/主题分组。',
+      3: '详细：每个单元包含标题 + 详细摘要（含定义、关键公式/原理、易混淆点、典型例子）+ 小节/主题分组。',
     };
     return `${TASK_PREP}
-你是教材分析助手。请对下方教材内容进行整体梳理，完成以下两项输出：
+你是教材分析助手。请对下方教材内容进行整体梳理，完成【教学单元划分与大纲框架】。
 
-## 任务一：教学单元划分
 按知识点逻辑划分为若干教学单元（单元数量由内容自然决定，通常 3~10 个）。
 详细程度档位：${detailLevel} 档 —— ${levelMap[detailLevel] || levelMap[2]}
-
-## 任务二：知识点细分为 100 个 + 教学大纲
-将全本教材的知识体系细分为恰好 **100 个具体知识点**（允许 ±10 个偏差），并生成一份三级教学大纲。
 
 输出严格的 JSON（不要解释文字、不要 markdown 代码块），结构：
 {
@@ -73,36 +74,47 @@ window.SPROMPTS = (function () {
     {
       "title": "单元标题（概括本单元核心主题）",
       "summary": "单元摘要（按选定档位详略）",
-      "knowledgePoints": ["知识点1", "知识点2", ...],
       "startChunk": 0,
       "endChunk": 7
     }
   ],
-  "knowledgePoints": [
-    { "id": "kp_001", "title": "具体知识点名称", "unitIndex": 0, "chunkStart": 0, "chunkEnd": 1 },
-    ...
-  ],
-  "syllabus": "# 教材教学大纲\\n\\n## 第一章 单元名\\n\\n### 1.1 小节名\\n\\n- 知识点1\\n- 知识点2\\n\\n..."
+  "syllabus": "# 教材教学大纲\\n\\n## 第1章 单元名\\n\\n### 1.1 小节名\\n\\n（小节一句话说明）\\n\\n## 第2章 ..."
 }
 
 要求：
 【关于 units】
 - 每个单元必须给出 startChunk 和 endChunk，对应下方教材片段的序号（从 0 开始，包含 endChunk）。确保所有片段都被覆盖、单元之间不重叠、且按教材顺序排列。
-- 只基于教材事实，不编造教材外的知识点。
+- 只基于教材事实，不编造教材外的单元。
 
-【关于 knowledgePoints（核心新增）】
-- 总数必须为 90~110 个（目标 100 个），均匀分布在所有单元中。
-- 每个知识点的 title 应具体、可验证（如"牛顿第二定律的数学表达式"，而非"力学基础"）。
-- unitIndex 指向所属单元在 units 数组中的下标（从 0 开始）。
-- chunkStart/chunkEnd 表示该知识点主要涉及的教材片段范围。
-- id 格式为 "kp_001"、"kp_002"……依次递增。
+【关于 syllabus（大纲框架）】
+- 使用 Markdown：## 对应单元名（units[i].title），### 对应单元内的小节/主题分组名；小节下只写一句话说明，不要列出具体知识点（知识点将在第二阶段补充）。
+- 本阶段绝对不要输出 knowledgePoints 字段。`;
+  }
 
-【关于 syllabus（教学大纲）】
-- 使用 Markdown 格式，严格三级标题结构：
-  - ## 一级：章节/单元名（对应 units[i].title）
-  - ### 二级：小节/主题分组
-  - 具体知识点用列表项 "- " 列出
-- 大纲必须涵盖全部 100 个知识点，与 knowledgePoints 数组一一对应。`;
+  // 第二阶段：只为给定的一批单元补充知识点（输出量小，避免被截断）。
+  function buildPrepKnowledgePointsSystem(detailLevel = 2) {
+    const kpMap = {
+      1: '每个单元提取 3~5 个核心知识点名称，不展开解释。',
+      2: '每个单元提取 5~8 个知识点，具体、可验证。',
+      3: '每个单元提取 8 个以上知识点，含定义、关键公式/原理、易混淆点等。',
+    };
+    return `${TASK_PREP}
+你是教材分析助手。下面给出一批教学单元及其对应的教材片段，请为【这些单元】提取具体知识点。
+详细程度档位：${detailLevel} 档 —— ${kpMap[detailLevel] || kpMap[2]}
+要求：根据教材自然密度，把每个单元的核心知识点完整、具体、可验证地列出来（不必强求总数为 100；空泛的"概念""基础"类名称不算知识点）。
+
+输出严格的 JSON（不要解释文字、不要 markdown 代码块），结构：
+{
+  "knowledgePoints": [
+    { "title": "具体知识点名称（如『牛顿第二定律的数学表达式』）", "unitIndex": 0, "chunkStart": 0, "chunkEnd": 1 },
+    ...
+  ]
+}
+
+要求：
+- unitIndex 指向该知识点所属单元在【下方 units 列表】中的下标（从 0 开始，是全局下标，不是批次内下标）。
+- chunkStart/chunkEnd 表示该知识点主要涉及的教材片段范围（使用下方片段的全局序号）。
+- 只基于教材事实，不编造教材外的知识点。`;
   }
 
   function buildSummarySystem({ currentWindow = null, lastQuestion = '' } = {}) {
@@ -220,5 +232,5 @@ ${ctx}严格遵守：
     return p;
   }
 
-  return { SYSTEM_RULES, TASK_PREP, TASK_SUMMARY, TASK_FLASHCARDS, buildSystemPrompt, buildAnchorPrompt, buildPrepSystem, buildSummarySystem, buildFlashcardSystem, LESSON_RULES, buildLessonPrompt };
+  return { SYSTEM_RULES, TASK_PREP, TASK_SUMMARY, TASK_FLASHCARDS, buildSystemPrompt, buildAnchorPrompt, buildPrepUnitsSystem, buildPrepKnowledgePointsSystem, buildSummarySystem, buildFlashcardSystem, LESSON_RULES, buildLessonPrompt };
 })();

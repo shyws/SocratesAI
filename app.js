@@ -401,7 +401,7 @@ async function renderTextbook(tbId) {
   const prepStatusText = !prep
     ? '尚未备课。建议先对教材做整体梳理，AI 会按知识点划分单元并跟踪进度。'
     : prep.status === 'processing'
-      ? '正在备课中，请稍候…'
+      ? (prep.phase ? `正在备课中：${prep.phase}` : '正在备课中，请稍候…')
       : prep.status === 'error'
         ? `备课失败：${prep.error || '未知错误'}。请检查 API Key 与网络后重试，或清除备课后重新点击「立即备课」。`
         : `备课完成（${prep.detailLevel} 档），共 ${(prep.units || []).length} 个单元${Array.isArray(prep.knowledgePoints) && prep.knowledgePoints.length ? ` · ${prep.knowledgePoints.length} 个知识点` : ''} · ${new Date(prep.completedAt).toLocaleString()}`;
