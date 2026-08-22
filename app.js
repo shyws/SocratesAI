@@ -304,7 +304,8 @@ async function renderTextbooks() {
     </div>
     <div id="pane-outline" style="display:none">
       <div class="muted" style="margin-bottom:6px">适用于「没有教材正文、只有一份三级知识点大纲」的场景。导入后可直接上课、生成闪卡与进度跟踪，无需原文。</div>
-      <label>三级大纲（Markdown：## 单元 → ### 小节 → - 知识点）</label>
+      <div class="row"><input type="file" id="nt-outline-file" accept=".md,.markdown,.txt" /><span class="muted" id="nt-outline-file-msg">也可选择 .md / .txt 大纲文件，自动填入下方文本框。</span></div>
+      <label style="margin-top:8px">三级大纲（Markdown：## 单元 → ### 小节 → - 知识点）</label>
       <textarea id="nt-outline" style="min-height:180px" placeholder="## 第一单元 函数与极限
 ### 1.1 函数概念
 - 函数的定义与记号
@@ -380,6 +381,19 @@ async function renderTextbooks() {
     }
   };
 
+  $('#nt-outline-file').onchange = async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    $('#nt-outline-file-msg').textContent = '读取中…';
+    try {
+      const txt = await f.text();
+      const ta = $('#nt-outline');
+      ta.value = txt;
+      $('#nt-outline-file-msg').textContent = `已读取 ${txt.length} 字，已填入大纲（可继续手动润色）。`;
+    } catch (err) {
+      $('#nt-outline-file-msg').textContent = '读取失败：' + err.message;
+    }
+  };
   $('#nt-fetch').onclick = async () => {
     const url = $('#nt-url').value.trim();
     if (!url) return ($('#nt-url-msg').textContent = '请填写链接');
