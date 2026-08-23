@@ -581,14 +581,29 @@ window.Engine = (function () {
     // 目标题数：下限 10 道；按本窗口知识点数适当增加（覆盖更多知识点）；上限 20 防止超出模型产出质量
     const kpCount = (windowCtx && Array.isArray(windowCtx.knowledgePoints)) ? windowCtx.knowledgePoints.length : 0;
     const targetCount = Math.min(20, Math.max(10, opts.targetCount || kpCount));
-    // 限制送审对话长度：只取最近 24 轮，避免上下文/token 超限导致 JSON 截断
+    // 限制送审对话长度：只取最近 24 轮，避免上下文/token 超限导致 JSON 截断。
+    // 关键修复：不再把多轮 user/assistant 交替直接 feed 给模型——
+    // 否则模型会延续「苏格拉底导师」角色继续对话，而非切换到闪卡生成模式（表现为输出
+    // "PUSH 的 Tag 是不是..."这类口语化文本而非 JSON）。
+    // 改为把对话扁平化为「单条 user 参考材料」（带【学员】/【老师】标签），最后一条指令由
+    // user 明确发出「切换为复习题生成器，只输出 JSON」，从结构上消除角色污染。
     const recentDialogues = (course.dialogues || []).slice(-24);
-    const cleanedDialogues = recentDialogues.map((d) => ({ role: d.role, content: cleanForReview(d.content || '') }));
+    const dialogueText = recentDialogues
+      .map((d) => `【${d.role === 'user' ? '学员' : '老师'}】${cleanForReview(d.content || '')}`)
+      .join('\n');
+    const refParts = [
+      `以下是本节课的师生对话记录（仅供出题参考，请勿接续、不要扮演其中任何角色）：\n\n${dialogueText}`,
+    ];
+    // 原代码把总结以 assistant 角色注入，等于告诉模型"你刚总结了，继续当导师"——这是污染的直接来源。
+    // 改为并入 user 参考块，不再保留 assistant 身份锚定。
+    if (course.summary) {
+      refParts.push(`【本节课总结参考】${JSON.stringify(course.summary)}`);
+    }
+    refParts.push('请基于上述对话，切换为「复习题生成器」角色，只输出闪卡 JSON 对象（{"flashcards":[...]}），不要任何前后缀、解释或对话文本。');
     const messages = [
       { role: 'system', content: P.buildFlashcardSystem({ currentWindow: windowCtx, targetCount, outlineMode: !!(tb && tb.mode === 'outline') }) },
-      ...cleanedDialogues,
+      { role: 'user', content: refParts.join('\n\n') },
     ];
-    if (course.summary) messages.push({ role: 'assistant', content: '本次总结：' + JSON.stringify(course.summary) });
 
     const { content, provider } = await callLLM(messages, { task: 'flashcards', temperature: 0.4, max_tokens: 8192, failLoud: true });
 

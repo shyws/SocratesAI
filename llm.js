@@ -27,6 +27,14 @@ window.LLM = (function () {
       temperature: opts && opts.temperature != null ? opts.temperature : 0.7,
       max_tokens: opts && opts.max_tokens != null ? opts.max_tokens : 1200,
     };
+    // 结构化输出任务（备课 / 总结 / 闪卡）：从协议层强制模型只输出合法 JSON 对象，
+    // 彻底杜绝模型在长对话历史里被「苏格拉底导师」角色带偏、输出口语化文本而非 JSON。
+    // 注意：json_object 模式要求顶层必须是对象，故闪卡提示词已改为 {"flashcards":[...]} 包裹形式；
+    // 不支持 response_format 的端点会返回 400，由上层 try/catch 抛出明确错误（failLoud）。
+    const JSON_TASKS = { prep: 1, summary: 1, flashcards: 1 };
+    if (opts && JSON_TASKS[opts.task]) {
+      body.response_format = { type: 'json_object' };
+    }
     // Prompt 缓存（省 token）：
     // - DeepSeek / OpenAI：前缀缓存默认开启，只需「稳定系统提示在最前且各轮不变」（Engine.chat 已做到），无需标记。
     // - Anthropic 兼容端点：若用户在设置中开启 cacheControl，则在 system 末段加 cache_control 标记。
