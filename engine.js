@@ -209,6 +209,20 @@ window.Engine = (function () {
     return copy;
   }
 
+  // 计算"下一未掌握知识点"标题列表（用于上课/对话聚焦，压回绕）。
+  // 已掌握(mastered)跳过；weak/未学纳入；取前 maxN 个（按 KP 顺序，保证"下一步"线性推进）。
+  function computeFocusKPs(tb, maxN) {
+    const kps = (tb && tb.prep && Array.isArray(tb.prep.knowledgePoints)) ? tb.prep.knowledgePoints : [];
+    const status = (tb && tb.progress && tb.progress.kpStatus) || {};
+    const out = [];
+    for (let i = 0; i < kps.length; i++) {
+      if (status[kps[i].id] === 'mastered') continue;
+      out.push(kps[i].title);
+      if (out.length >= (maxN || 6)) break;
+    }
+    return out;
+  }
+
   // 大纲模式（无教材正文）：把"当前单元的大纲内容"拼成锚点文本数组，供提示词作为教材锚点注入。
   function buildOutlineAnchor(tb, unitIndex) {
     const prep = tb && tb.prep;
@@ -450,6 +464,19 @@ window.Engine = (function () {
       ? (s.learner.globalPersona || '')
       : ((tb && tb.personaOverride && tb.personaOverride.trim()) || (s.learner.globalPersona || ''));
     const progress = tb ? tb.progress : null;
+    // 把 coveredUnitIndices 映射为单元标题，传给 buildSystemPrompt 作为"已学清单"硬护栏。
+    // 注意：浅克隆 progress，避免污染 tb.progress（防止模型看到"假"数据）。
+    const progressForPrompt = progress && tb.prep && Array.isArray(tb.prep.units)
+      ? Object.assign({}, progress, {
+          // 仅当教材含多个 unit 时才注入"已覆盖单元"护栏；单 unit 教材（如 SSD/BSP）若注入，
+          // 会把它唯一的 unit 标成"已学"，与"聚焦下一未掌握 KP"冲突，反而限制教学。
+          coveredUnitTitles: (tb.prep.units.length > 1 && (progress.coveredUnitIndices || []).length)
+            ? (progress.coveredUnitIndices || []).map((i) => tb.prep.units[i] && tb.prep.units[i].title).filter(Boolean)
+            : [],
+        })
+      : progress;
+    // 焦点 KP：告诉模型本节课应优先围绕哪些"未掌握知识点"展开，压回绕。
+    const focusKPs = computeFocusKPs(tb, 6);
     const tbHasImages = !!(tb && tb.hasImages);
     const isOutline = !!(tb && tb.mode === 'outline');
     const currentWindow = (course && course.currentWindow) || (tb ? Store.getCurrentWindow(tb) : null);
@@ -461,7 +488,7 @@ window.Engine = (function () {
     const outlineAnchor = isOutline ? buildOutlineAnchor(tb, winUnitIndex) : null;
     const anchor = isOutline ? outlineAnchor : await retrieve(allChunks, message, 3, { tb, start: win ? win.start : 0, end: win ? win.end : Math.max(0, allChunks.length - 1) });
     // 稳定系统提示（规则+人设+进度+媒介）放最前 → DeepSeek/OpenAI 前缀缓存命中（1/10 价）
-    const stableSystem = P.buildSystemPrompt({ personaText, progress, textbookHasImages: tbHasImages, outlineContent: isOutline ? outlineAnchor : null });
+    const stableSystem = P.buildSystemPrompt({ personaText, progress: progressForPrompt, textbookHasImages: tbHasImages, outlineContent: isOutline ? outlineAnchor : null, focusKPs });
     const messages = [{ role: 'system', content: stableSystem }];
     const anchorText = P.buildAnchorPrompt(anchor, isOutline ? outlineAnchor : null);
     if (anchorText) messages.push({ role: 'system', content: anchorText });
@@ -506,7 +533,8 @@ window.Engine = (function () {
       if (currentWindow && currentWindow.startChunk != null && currentWindow.endChunk != null) windowTexts = allTexts.slice(currentWindow.startChunk, currentWindow.endChunk + 1);
       chunks = windowTexts.slice(0, 8);
     }
-    const system = P.buildLessonPrompt({ personaText, textbookChunks: chunks, pendingQuestion: pendQ, textbookHasImages: !!tb.hasImages, currentWindow: windowCtx, outlineContent, outlineMode: isOutline });
+    const focusKPs = computeFocusKPs(tb, 6);
+    const system = P.buildLessonPrompt({ personaText, textbookChunks: chunks, pendingQuestion: pendQ, textbookHasImages: !!tb.hasImages, currentWindow: windowCtx, outlineContent, outlineMode: isOutline, focusKPs });
     const messages = [
       { role: 'system', content: system },
       { role: 'user', content: pendQ
@@ -532,8 +560,12 @@ window.Engine = (function () {
     const currentWindow = course.currentWindow || Store.getCurrentWindow(tb);
     const windowCtx = enrichWindow(currentWindow, tb);
     const lastQuestion = cleanPending(course.lastQuestion || '');
+    // 把"本节课窗口所属单元"的知识点清单传给总结模型，让它直接标注 kpStatus（引用真实 KP id，比字符串匹配可靠）。
+    const kpList = (tb.prep && Array.isArray(tb.prep.knowledgePoints) ? tb.prep.knowledgePoints : [])
+      .filter((kp) => (currentWindow && currentWindow.unitIndex != null && currentWindow.unitIndex >= 0) ? kp.unitIndex === currentWindow.unitIndex : true)
+      .map((kp) => ({ id: kp.id, title: kp.title }));
     const messages = [
-      { role: 'system', content: P.buildSummarySystem({ currentWindow: windowCtx, lastQuestion, outlineMode: !!(tb && tb.mode === 'outline') }) },
+      { role: 'system', content: P.buildSummarySystem({ currentWindow: windowCtx, lastQuestion, outlineMode: !!(tb && tb.mode === 'outline'), kpList }) },
       ...course.dialogues.map((d) => ({ role: d.role, content: d.content })),
     ];
     const { content, provider } = await callLLM(messages, { task: 'summary', temperature: 0.3, max_tokens: 1500 });
@@ -544,6 +576,8 @@ window.Engine = (function () {
       title, mastered: toArr(parsed.mastered), weak: toArr(parsed.weak),
       nextSteps: toArr(parsed.nextSteps), keyPoints: toArr(parsed.keyPoints),
       pendingQuestion: cleanPending(parsed.pendingQuestion || lastQuestion || ''),
+      // 模型直接标注的 KP 状态（引用真实 KP id），endCourse 据此更新 tb.progress.kpStatus
+      kpStatus: (parsed && parsed.kpStatus && typeof parsed.kpStatus === 'object') ? parsed.kpStatus : {},
     };
     const isEmpty = !summary.title && !summary.mastered.length && !summary.weak.length && !summary.nextSteps.length && !summary.keyPoints.length;
     if (isEmpty) {
@@ -613,9 +647,50 @@ window.Engine = (function () {
 
     let cards = parseJSON(content, { unwrapArray: true });
     if (!Array.isArray(cards) || !cards.length) {
-      const preview = String(content || '').replace(/\s+/g, ' ').slice(0, 300);
-      console.warn('[Engine] 闪卡解析失败，原始响应前 300 字：', preview);
-      throw new Error(`AI 返回的闪卡无法解析为合法 JSON 数组（可能截断或格式异常）。响应片段：${preview || '（空）'}`);
+      const firstPreview = String(content || '').replace(/\s+/g, ' ').slice(0, 300);
+      console.warn('[Engine] 闪卡首轮解析失败，触发 self-correction 重试。原始响应前 300 字：', firstPreview);
+
+      // Self-correction loop（JSON-repair pass，OpenAI Cookbook / Anthropic 均有推荐）：
+      // 把首轮 assistant 响应作为上下文拼回 messages，再用更低的 temperature（0.2）让模型"重写"为合法 JSON。
+      // 这是把 DeepSeek response_format json_object 偶发失效（~1–5%）压到接近 0% 的关键兜底。
+      const repairMessages = messages.concat([
+        { role: 'assistant', content: String(content || '').slice(0, 6000) },
+        { role: 'user', content:
+          '你上一轮的输出无法被解析为合法 JSON（可能被截断、或混入了对话文本）。\n' +
+          '请立即重写为严格的 JSON 对象，结构必须是 {"flashcards":[...]}：\n' +
+          '1. 你的全部输出就是这个 JSON 对象本身，绝不要写"好的""以下是"等前后缀；\n' +
+          '2. 不要再扮演苏格拉底导师，绝不输出对话文本或解释；\n' +
+          '3. 即使只能想到 1~2 道题，也要输出完整的 {"flashcards":[...]} 结构。' },
+      ]);
+      let retryContent = '';
+      let retryError = '';
+      try {
+        const retry = await callLLM(repairMessages, { task: 'flashcards', temperature: 0.2, max_tokens: 8192, failLoud: true });
+        retryContent = retry.content || '';
+        cards = parseJSON(retryContent, { unwrapArray: true });
+        if (Array.isArray(cards) && cards.length) {
+          console.info('[Engine] self-correction 重试成功，得到', cards.length, '张闪卡');
+        }
+      } catch (e) {
+        retryError = e.message || String(e);
+        console.warn('[Engine] self-correction 重试调用失败：', retryError);
+      }
+
+      // 首轮 + 重试均失败：把首轮 + 重试的原始响应落盘到 course.flashcardLastError（用户可在控制台 dump 查看完整诊断），再抛错
+      if (!Array.isArray(cards) || !cards.length) {
+        const finalPreview = String(retryContent || content || '').replace(/\s+/g, ' ').slice(0, 300);
+        try {
+          Store.saveCourse(textbookId, courseId, {
+            flashcardLastError: {
+              at: new Date().toISOString(),
+              firstRaw: String(content || '').slice(0, 4000),
+              retryRaw: String(retryContent || '').slice(0, 4000),
+              retryError,
+            },
+          });
+        } catch (e) { /* 落盘失败不影响抛错 */ }
+        throw new Error(`AI 返回的闪卡无法解析为合法 JSON 数组（首轮 + 重试均失败）。响应片段：${finalPreview || '（空）'}`);
+      }
     }
     const added = Store.addFlashcards(textbookId, courseId, cards, { replace: true });
     return { flashcards: added, provider, targetCount };
@@ -642,34 +717,28 @@ window.Engine = (function () {
     }
     const pendingQuestion = cleanPending(summary.pendingQuestion || fallbackPending || '');
     const saved = Store.saveCourse(textbookId, courseId, { pendingQuestion, status: 'ended', endedAt: new Date().toISOString() });
-    Store.advanceProgress(textbookId);
-    // 根据课后总结更新知识点状态（mastered/weak → 对应KP）
+    // 先根据本课的总结更新 KP 状态（mastered/weak），再推进进度——
+    // 这样 advanceProgress 的 KP 级完成判定才能读到本轮刚更新的 kpStatus。
     if (summary && tb.prep && Array.isArray(tb.prep.knowledgePoints) && tb.prep.knowledgePoints.length) {
       const kpStatusUpdates = {};
       const kps = tb.prep.knowledgePoints;
-      (summary.mastered || []).forEach((m) => {
-        kps.forEach((kp) => {
-          if (kp.title.includes(m) || m.includes(kp.title)) kpStatusUpdates[kp.id] = 'mastered';
-        });
-      });
-      (summary.weak || []).forEach((w) => {
-        kps.forEach((kp) => {
-          if (kp.title.includes(w) || w.includes(kp.title)) kpStatusUpdates[kp.id] = 'weak';
-        });
-      });
-      // 当前窗口内的未匹配KP标记为unlearned
-      const win = course.currentWindow || Store.getCurrentWindow(tb);
-      const isOutline = tb.mode === 'outline';
-      if (win && win.startChunk != null) {
-        kps.forEach((kp) => {
-          const inWindow = isOutline
-            ? (kp.unitIndex === win.unitIndex)
-            : (kp.chunkStart >= win.startChunk - 2 && kp.chunkStart <= (win.endChunk || win.startChunk) + 2);
-          if (inWindow && !kpStatusUpdates[kp.id]) kpStatusUpdates[kp.id] = 'unlearned';
+      // 优先使用模型直接标注的 kpStatus（引用真实 KP id），比字符串包含匹配可靠得多
+      if (summary.kpStatus && typeof summary.kpStatus === 'object') {
+        Object.keys(summary.kpStatus).forEach((id) => {
+          const st = summary.kpStatus[id];
+          if (st === 'mastered' || st === 'weak') kpStatusUpdates[id] = st;
         });
       }
+      // 兜底：旧字符串包含匹配（兼容未输出 kpStatus 的历史/兜底总结）
+      (summary.mastered || []).forEach((m) => {
+        kps.forEach((kp) => { if (kp.title.includes(m) || m.includes(kp.title)) kpStatusUpdates[kp.id] = 'mastered'; });
+      });
+      (summary.weak || []).forEach((w) => {
+        kps.forEach((kp) => { if (kp.title.includes(w) || w.includes(kp.title)) kpStatusUpdates[kp.id] = 'weak'; });
+      });
       if (Object.keys(kpStatusUpdates).length) Store.updateKpStatus(textbookId, kpStatusUpdates);
     }
+    Store.advanceProgress(textbookId);
     return { summary: saved.summary, flashcards: saved.flashcards, pendingQuestion, courseId, flashcardError, flashcardProvider };
   }
 

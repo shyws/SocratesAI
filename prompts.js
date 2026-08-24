@@ -31,7 +31,7 @@ window.SPROMPTS = (function () {
   // 稳定的系统提示（规则 + 人设 + 进度 + 媒介说明），不含教材锚点。
   // 把不变的大段放在最前面，是为了配合 DeepSeek/OpenAI 的「前缀缓存」：
   // 稳定前缀在各轮重复命中，计费仅 1/10。教材锚点由 Engine 作为独立 system 消息追加（每轮可变）。
-  function buildSystemPrompt({ personaText, progress, textbookChunks, textbookHasImages = false, outlineContent, learnerLevel } = {}) {
+  function buildSystemPrompt({ personaText, progress, textbookChunks, textbookHasImages = false, outlineContent, learnerLevel, focusKPs } = {}) {
     let p = SYSTEM_RULES + '\n\n';
     const lvl = (learnerLevel && learnerLevel.trim()) ? learnerLevel.trim() : '零基础（默认：学员对该学科无任何前置知识）';
     p += `【学员基础】\n本次教学默认按以下基础开展：${lvl}\n除非【教学者人设（本次生效）】中明确说明学员已有相关基础，否则一律从直觉与生活常识讲起，不预设任何前置知识、不抛出未解释的专业术语。\n\n`;
@@ -40,7 +40,9 @@ window.SPROMPTS = (function () {
     }
     if (progress) {
       const x = progress;
-      p += `【当前教材进度】\n已掌握：${(x.mastered || []).join('、') || '无'}\n薄弱：${(x.weak || []).join('、') || '无'}\n阶段目标：${x.currentGoal || '未设定'}\n阶段：${x.stage || 1}\n\n`;
+      // 已覆盖单元（标题）作为"已学清单"硬护栏传入：让模型在 prompt 层就知道哪些单元已学过，
+      // 避免在单 unit 教材（窗口永远不变）上反复把对话拉回旧单元，体感"回绕"。
+      p += `【当前教材进度】\n已掌握：${(x.mastered || []).join('、') || '无'}\n薄弱：${(x.weak || []).join('、') || '无'}\n阶段目标：${x.currentGoal || '未设定'}\n阶段：${x.stage || 1}\n${Array.isArray(x.coveredUnitTitles) && x.coveredUnitTitles.length ? `已覆盖单元（已学过，除非学员主动回顾，否则不要作为主推内容）：${x.coveredUnitTitles.join('、')}\n` : ''}${Array.isArray(focusKPs) && focusKPs.length ? `本节课重点（尚未掌握的（弱/未学）知识点，优先围绕这些展开，不要回头重讲已掌握内容）：${focusKPs.join('、')}\n` : ''}\n\n`;
     }
     if (outlineContent && outlineContent.length) {
       p += `【教材大纲锚点（本节课单元内容，仅据此引导，勿编造）】\n` + outlineContent.join('\n') + '\n\n';
@@ -149,7 +151,7 @@ window.SPROMPTS = (function () {
 - 不要出现"概念""基础""概述"等空泛知识点标题。`;
   }
 
-  function buildSummarySystem({ currentWindow = null, lastQuestion = '', outlineMode = false } = {}) {
+  function buildSummarySystem({ currentWindow = null, lastQuestion = '', outlineMode = false, kpList = [] } = {}) {
     let ctx = '';
     if (currentWindow) {
       ctx += `【本节课窗口】\n`;
@@ -164,22 +166,29 @@ window.SPROMPTS = (function () {
     if (lastQuestion) {
       ctx += `【本节课最后一问（必须记录，作为下次课程起点）】\n${lastQuestion}\n\n`;
     }
+    let kpBlock = '';
+    if (Array.isArray(kpList) && kpList.length) {
+      kpBlock = `【本节课窗口知识点清单（id｜标题），请在 kpStatus 中标注你判断为已掌握/薄弱的 KP】\n` +
+        kpList.map((k) => `${k.id}｜${k.title}`).join('\n') + '\n\n';
+    }
     return `${TASK_SUMMARY}
 你是严谨的学科总结助手。请基于【本节课窗口】的教材内容与师生对话，输出专业、严谨、结构化的课后总结。
-${ctx}输出严格的 JSON（不要任何解释文字、不要 markdown 代码块、不要额外字段），结构：
+${ctx}${kpBlock}输出严格的 JSON（不要任何解释文字、不要 markdown 代码块、不要额外字段），结构：
 {
   "title": "本节课内容总结标题（≤16字，概括核心主题，如『牛顿第二定律的推导与应用』）",
   "mastered": ["已掌握的知识点，需具体、可验证"],
   "weak": ["仍薄弱/存疑处"],
   "nextSteps": ["建议的下一步学习动作"],
   "keyPoints": ["本窗口核心专业知识点，用学科术语表述"],
-  "pendingQuestion": "本节课最后抛出的问题（清洗后），下次课程将从此继续"
+  "pendingQuestion": "本节课最后抛出的问题（清洗后），下次课程将从此继续",
+  "kpStatus": { "kp_001": "mastered", "kp_005": "weak" }
 }
   要求：
   - 总结必须紧扣【本节课窗口】的教材内容，用学员能看懂的通俗语言概括，不编造；若确需提到专业术语，请先用大白话点明它指什么。
   - mastered / weak / nextSteps / keyPoints 用具体、可理解的方式表述，侧重"学员理解了什么、还差哪一步"，不必堆砌术语名称；如确需写术语，请紧跟一句通俗解释（如"牛顿第二定律 F=ma（物体受力越大、加速度越大）"）。
   - mastered/weak/nextSteps/keyPoints 至少各 1 条；pendingQuestion 必须填写，优先使用【本节课最后一问】，若无则根据窗口内容提炼一个自然的续接问题。
-  - pendingQuestion 只保留问题本身，不要舞台提示、参考注脚、斜体旁白。`;
+  - pendingQuestion 只保留问题本身，不要舞台提示、参考注脚、斜体旁白。
+  - kpStatus：仅填写你确有把握的、且属于上方【本节课窗口知识点清单】中的 KP id，值为 "mastered" 或 "weak"。不确定可不填；禁止编造清单外的 id。这条用于精细进度跟踪，比 mastered/weak 文本匹配更可靠，请尽量填写。`;
   }
 
   function buildFlashcardSystem({ currentWindow = null, targetCount = 10, outlineMode = false } = {}) {
@@ -251,7 +260,7 @@ ${ctx}严格遵守：
 - 基于教材锚点引导，不编造教材外的事实；评价理解看"能否用自己的话讲清逻辑"，而非"能否说出术语"。
 始终用中文回复。`;
 
-  function buildLessonPrompt({ personaText, textbookChunks, pendingQuestion, textbookHasImages = false, currentWindow = null, outlineContent = null, outlineMode = false, isFirstLesson = false }) {
+  function buildLessonPrompt({ personaText, textbookChunks, pendingQuestion, textbookHasImages = false, currentWindow = null, outlineContent = null, outlineMode = false, isFirstLesson = false, focusKPs = [] }) {
     let p = LESSON_RULES + '\n\n';
     if (personaText && personaText.trim()) {
       p += `【教学者人设（本次生效）】\n${personaText.trim()}\n\n`;
@@ -269,6 +278,10 @@ ${ctx}严格遵守：
         p += `本窗口知识点：${currentWindow.knowledgePoints.join('、')}\n`;
       }
       p += '\n';
+    }
+    if (Array.isArray(focusKPs) && focusKPs.length) {
+      p += `【本节课重点（以下为尚未掌握的（弱/未学）知识点，请在本节课的后续深入中优先围绕这些展开，不要回头重讲已掌握内容）】\n${focusKPs.join('、')}\n\n` +
+        `⚠️ 优先级铁律：若下方存在【上次遗留问题】，则本节课第一个引导性问题【必须】接续该遗留问题（详见末尾指令）；本重点仅作为遗留问题被解答后的后续深化方向，绝不抢占第一问。`;
     }
     if (pendingQuestion && pendingQuestion.trim()) {
       p += `【上次遗留问题（本节课从这里继续）】\n${pendingQuestion.trim()}\n\n`;

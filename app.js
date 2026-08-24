@@ -246,7 +246,22 @@ function renderProgressGrid(tb, compact) {
   const cells = compact ? 30 : (kps ? Math.min(kps.length, 110) : 100);
   const displayKps = kps ? kps.slice(0, cells) : null;
 
-  let html = `<div class="progress-grid ${compact ? 'compact' : ''}" title="每格=1个知识点。实心=已掌握；空心=薄弱；灰色=未学习">`;
+  // 计算"下一步"：第一个未掌握（非 mastered）的 KP 下标；以及各状态计数
+  let firstUnmasteredIndex = -1;
+  if (displayKps) {
+    for (let i = 0; i < displayKps.length; i++) {
+      const st = kpStatus[displayKps[i].id] || 'unlearned';
+      if (st !== 'mastered') { firstUnmasteredIndex = i; break; }
+    }
+  }
+  let masteredCount = 0, weakCount = 0, unlearnedCount = 0;
+  (displayKps || []).forEach((kp) => {
+    const st = kpStatus[kp.id] || 'unlearned';
+    if (st === 'mastered') masteredCount++; else if (st === 'weak') weakCount++; else unlearnedCount++;
+  });
+  const totalKps = displayKps ? displayKps.length : 0;
+  const nextTitle = (firstUnmasteredIndex >= 0 && displayKps[firstUnmasteredIndex]) ? displayKps[firstUnmasteredIndex].title : '';
+  let html = `<div class="progress-grid ${compact ? 'compact' : ''}" title="每格=1个知识点。实心=已掌握；空心=薄弱；灰色=未学习；蓝框=下一步">`;
   for (let i = 0; i < cells; i++) {
     let cls = 'progress-cell';
     if (displayKps && displayKps[i]) {
@@ -259,6 +274,7 @@ function renderProgressGrid(tb, compact) {
       } else {
         cls += ' unlearned';  // 未学习：灰色
       }
+      if (i === firstUnmasteredIndex) cls += ' next';  // 下一步：蓝框高亮
     } else {
       // 无知识点数据时的退化显示
       cls += ' unlearned';
@@ -267,7 +283,8 @@ function renderProgressGrid(tb, compact) {
   }
   html += `</div>`;
   if (!compact) {
-    html += `<div class="progress-legend"><span class="dot mastered"></span>已掌握 <span class="dot weak"></span>薄弱点 <span class="dot unlearned"></span>未学习</div>`;
+    html += `<div class="progress-legend"><span class="dot mastered"></span>已掌握 ${masteredCount} <span class="dot weak"></span>薄弱 ${weakCount} <span class="dot unlearned"></span>未学习 ${unlearnedCount} <span class="dot next"></span>下一步</div>`;
+    html += `<div class="muted" style="margin-top:4px">共 ${totalKps} 个知识点${nextTitle ? ` ｜ 下一步：<b>${esc(nextTitle)}</b>` : ' ｜ 已全部掌握 🎉'}</div>`;
     if (!prep || prep.status !== 'completed') {
       const msg = (prep && prep.status === 'error')
         ? `上次备课失败：${esc(prep.error || '未知错误')}。可点击「立即备课」重试。`

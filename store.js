@@ -210,16 +210,38 @@ window.Store = (function () {
   function cancelPrep(tbId) { return setPrep(tbId, null); }
 
   /* ---------------- 进度窗口 ---------------- */
+  // KP 级进度辅助：hasKps=是否有知识点数据；allResolved=所有 KP 均为 mastered/weak；
+  // nextKpUnitIndex=第一个未掌握 KP 所属 unit（用于把教学窗口推进到该 unit）。
+  function kpProgressInfo(tb) {
+    const kps = tb.prep && Array.isArray(tb.prep.knowledgePoints) ? tb.prep.knowledgePoints : [];
+    const status = (tb.progress && tb.progress.kpStatus) || {};
+    if (!kps.length) return { hasKps: false, allResolved: false, nextKpUnitIndex: -1 };
+    let allResolved = true;
+    let nextKpUnitIndex = -1;
+    for (let i = 0; i < kps.length; i++) {
+      const st = status[kps[i].id];
+      if (st === 'mastered' || st === 'weak') continue;
+      allResolved = false;
+      if (nextKpUnitIndex < 0) nextKpUnitIndex = (kps[i].unitIndex != null ? kps[i].unitIndex : 0);
+    }
+    return { hasKps: true, allResolved, nextKpUnitIndex };
+  }
   function getCurrentWindow(tb) {
     const isOutline = tb.mode === 'outline';
     const n = (tb.chunks || []).length;
     if (!isOutline && !n) return null;
-    if (tb.progress && tb.progress.currentWindow) return tb.progress.currentWindow;
+    const info = kpProgressInfo(tb);
+    // KP 已全部 resolved（mastered/weak）→ 视为学完，返回 null（UI 显示"✅ 已完成"）。
+    // 单 unit 教材（如 SSD/BSP，全书=1 个 unit）因此不会在第 1 节课后被误判"完成"，而是继续围绕未掌握 KP 推进。
+    if (info.hasKps && info.allResolved) return null;
+    if (tb.progress && tb.progress.currentWindow && !tb.progress.completedAll) return tb.progress.currentWindow;
     const prep = tb.prep;
     if (prep && prep.status === 'completed' && Array.isArray(prep.units) && prep.units.length) {
       const covered = new Set(tb.progress.coveredUnitIndices || []);
-      const idx = prep.units.findIndex((_, i) => !covered.has(i));
-      const unitIndex = idx >= 0 ? idx : prep.units.length - 1;
+      // 优先推进到"下一个未掌握 KP 所在 unit"；否则退回首个未 covered 的 unit。
+      let unitIndex = prep.units.findIndex((_, i) => !covered.has(i));
+      if (unitIndex < 0) unitIndex = prep.units.length - 1;
+      if (info.hasKps && info.nextKpUnitIndex >= 0) unitIndex = info.nextKpUnitIndex;
       if (isOutline) {
         return { startChunk: unitIndex, endChunk: unitIndex, unitIndex };
       }
@@ -234,6 +256,8 @@ window.Store = (function () {
     tb.progress = tb.progress || {};
     tb.progress.currentWindow = window;
     if (window && window.unitIndex != null) tb.progress.currentUnitIndex = window.unitIndex;
+    // 手动设窗口 = 重新进入未完成学习 → 清除"已完成"标记（否则 getCurrentWindow 会一直返回 null）
+    if (window) tb.progress.completedAll = false;
     save(); return tb.progress;
   }
   function advanceProgress(tbId) {
@@ -243,6 +267,9 @@ window.Store = (function () {
     const currentIdx = tb.progress.currentUnitIndex;
     if (currentIdx != null && currentIdx >= 0) covered.add(currentIdx);
     const prep = tb.prep;
+    const info = kpProgressInfo(tb);
+    const isOutline = tb.mode === 'outline';
+    const n = tb.chunks.length;
     let nextIdx = -1;
     if (prep && prep.status === 'completed' && Array.isArray(prep.units) && prep.units.length) {
       nextIdx = prep.units.findIndex((_, i) => !covered.has(i));
@@ -250,17 +277,22 @@ window.Store = (function () {
     }
     tb.progress.coveredUnitIndices = Array.from(covered);
     tb.progress.currentUnitIndex = nextIdx;
-    const isOutline = tb.mode === 'outline';
-    const n = tb.chunks.length;
-    if (nextIdx >= 0 && prep.units[nextIdx]) {
-      if (isOutline) {
-        tb.progress.currentWindow = { startChunk: nextIdx, endChunk: nextIdx, unitIndex: nextIdx };
-      } else {
-        const u = prep.units[nextIdx];
-        tb.progress.currentWindow = { startChunk: Math.max(0, u.startChunk || 0), endChunk: Math.min(n - 1, u.endChunk ?? n - 1), unitIndex: nextIdx };
-      }
-    } else if (nextIdx === -1) {
+    // 完成判定：优先以 KP 是否全部 resolved（mastered/weak）为准；无 KP 数据时退回 unit 覆盖判定。
+    // 单 unit 教材（如 SSD/BSP，全书=1 个 unit）不会在第 1 节课后就被误判"完成"，
+    // 而是继续围绕未掌握 KP 推进，直到所有 KP 都 mastered/weak 才标记 completedAll。
+    const done = info.hasKps ? info.allResolved : (nextIdx < 0);
+    if (done) {
+      tb.progress.completedAll = true;
       tb.progress.currentWindow = { startChunk: 0, endChunk: isOutline ? 0 : Math.max(0, n - 1), unitIndex: -1 };
+    } else {
+      tb.progress.completedAll = false;
+      const unitIndex = (info.hasKps && info.nextKpUnitIndex >= 0) ? info.nextKpUnitIndex : nextIdx;
+      if (isOutline) {
+        tb.progress.currentWindow = { startChunk: unitIndex, endChunk: unitIndex, unitIndex };
+      } else {
+        const u = prep.units[unitIndex];
+        tb.progress.currentWindow = { startChunk: Math.max(0, (u && u.startChunk) || 0), endChunk: Math.min(n - 1, (u && (u.endChunk ?? n - 1)) || n - 1), unitIndex };
+      }
     }
     save(); return tb.progress;
   }
