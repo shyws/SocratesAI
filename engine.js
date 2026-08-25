@@ -569,16 +569,23 @@ window.Engine = (function () {
       ...course.dialogues.map((d) => ({ role: d.role, content: d.content })),
     ];
     const { content, provider } = await callLLM(messages, { task: 'summary', temperature: 0.3, max_tokens: 1500, failLoud: true });
-    // 特例：模型返回了 200 但 content 为空。常见于"推理型/实验型"模型（如 deepseek-v4-flash）
-    // 把 token 烧在内部思考上、content 留空，或被服务端内容过滤清空。给出明确指引。
+    // 特例：模型返回了 200 但 content 为空。常见于 DeepSeek V4 默认"思考模式"
+    // 与 response_format=json_object 冲突，把 token 烧在内部思考上，content 留空
+    // （官方文档原文：「使用 JSON 模式时，你还必须通过系统或用户消息指示模型生成 JSON。
+    //  否则，模型可能会生成不断的空白字符，直到生成达到令牌限制」）。
+    // 真正的根因修复见 public/llm.js：所有请求强制加 thinking:{type:"disabled"}。
+    // 这里只做诊断提示，让用户能识别"代码没部署成功"vs"配置问题"。
     if (provider !== 'mock' && (!content || !String(content).trim())) {
       throw new Error(
-        'AI 返回了 200 但 content 字段为空字符串（finish_reason 通常为 stop）。'
-        + '这通常是模型问题，常见原因：\n'
-        + '1) 你设置里用的模型（如 deepseek-v4-flash）不遵守 response_format=json_object，'
-        + '把 token 耗在"内部思考"上而没产出文本 → 换成 deepseek-chat（官方 V3）即可\n'
-        + '2) prompt 过长（你这次 prompt_tokens=10641），模型"思考完"已无余量输出 → 缩短对话或减小 max_tokens 之外的输入\n'
-        + '3) 服务端触发了内容安全过滤 → 换个模型或调整 prompt'
+        'AI 返回了 200 但 content 字段为空字符串（finish_reason 通常为 stop）。\n\n'
+        + '这是 DeepSeek V4 系列特有的"思考模式 + JSON 模式"冲突陷阱：模型把 token 烧在内部思考上，content 留空。\n'
+        + '修复方案：在请求体里加 "thinking": { "type": "disabled" }（Socratopia 最新版已在 public/llm.js 自动加）。\n\n'
+        + '如果 Socratopia 最新代码已部署、还看到这条，请按顺序排查：\n'
+        + '1)【最常见】浏览器跑的是 GitHub Pages 旧版本 → 确认已重新部署 + Ctrl+Shift+R 硬刷新\n'
+        + '2) 设置里的 baseURL 不是 DeepSeek 官方 https://api.deepseek.com/v1（第三方代理可能忽略 thinking 参数）→ 改回官方端点\n'
+        + '3) prompt 过长（你这次 prompt_tokens=' + (course.dialogues.length || 0) + '，实际由 usage.prompt_tokens 显示），缩短对话历史或减小输入\n'
+        + '4) 服务端触发内容安全过滤 → 换模型（v4-flash ↔ v4-pro）或调整 prompt\n\n'
+        + '参考：https://api-docs.deepseek.com/zh-cn/guides/thinking_mode'
       );
     }
     let parsed = {};
