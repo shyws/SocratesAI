@@ -568,7 +568,19 @@ window.Engine = (function () {
       { role: 'system', content: P.buildSummarySystem({ currentWindow: windowCtx, lastQuestion, outlineMode: !!(tb && tb.mode === 'outline'), kpList }) },
       ...course.dialogues.map((d) => ({ role: d.role, content: d.content })),
     ];
-    const { content, provider } = await callLLM(messages, { task: 'summary', temperature: 0.3, max_tokens: 1500 });
+    const { content, provider } = await callLLM(messages, { task: 'summary', temperature: 0.3, max_tokens: 1500, failLoud: true });
+    // 特例：模型返回了 200 但 content 为空。常见于"推理型/实验型"模型（如 deepseek-v4-flash）
+    // 把 token 烧在内部思考上、content 留空，或被服务端内容过滤清空。给出明确指引。
+    if (provider !== 'mock' && (!content || !String(content).trim())) {
+      throw new Error(
+        'AI 返回了 200 但 content 字段为空字符串（finish_reason 通常为 stop）。'
+        + '这通常是模型问题，常见原因：\n'
+        + '1) 你设置里用的模型（如 deepseek-v4-flash）不遵守 response_format=json_object，'
+        + '把 token 耗在"内部思考"上而没产出文本 → 换成 deepseek-chat（官方 V3）即可\n'
+        + '2) prompt 过长（你这次 prompt_tokens=10641），模型"思考完"已无余量输出 → 缩短对话或减小 max_tokens 之外的输入\n'
+        + '3) 服务端触发了内容安全过滤 → 换个模型或调整 prompt'
+      );
+    }
     let parsed = {};
     if (provider !== 'mock') parsed = parseJSON(content) || {};
     const title = (typeof parsed.title === 'string' && parsed.title.trim()) ? parsed.title.trim().slice(0, 40) : '';
@@ -581,10 +593,14 @@ window.Engine = (function () {
     };
     const isEmpty = !summary.title && !summary.mastered.length && !summary.weak.length && !summary.nextSteps.length && !summary.keyPoints.length;
     if (isEmpty) {
-      const fb = mockSummary(course.dialogues);
-      summary.title = fb.title; summary.mastered = fb.mastered; summary.weak = fb.weak;
-      summary.nextSteps = fb.nextSteps; summary.keyPoints = fb.keyPoints;
-      summary.pendingQuestion = cleanPending(course.lastQuestion || '');
+      const preview = String(content || '').replace(/\s+/g, ' ').slice(0, 200);
+      // 不再静默退回演示数据：API 调用失败 / 返回非 JSON / 无 Key 都应明确暴露，
+      // 与 prepareNow / extractFlashcards 的 failLoud 行为对齐。
+      throw new Error(
+        'AI 返回的总结无法解析为有效 JSON（可能是 API Key 失效、限流、网络中断、'
+        + '或模型未返回 JSON 结构）。请检查设置中的 API Key 与网络后重试。'
+        + (preview ? '\n原始响应片段：' + preview : '')
+      );
     }
     const saved = Store.setSummary(textbookId, courseId, summary);
     if (saved.title) Store.saveCourse(textbookId, courseId, { title: saved.title });

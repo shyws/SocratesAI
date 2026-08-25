@@ -6,8 +6,11 @@
    若用户曾显式填过 baseURL / model（旧数据），仍可兼容沿用。 */
 window.LLM = (function () {
   // 内置默认端点（用户只需填 Key）
+  // 2026-08 更新：V3 的 deepseek-chat 已下线，V4 系列官方 ID 为 deepseek-v4-flash。
+  // 兼容期（到 2026-07-24 后过期，参考 deepseekai.guide V4 文档）老 ID 仍可路由到 V4-Flash，
+  // 但建议新代码直接写 V4 系列名，避免依赖临时兼容。
   const DEFAULT_BASE_URL = 'https://api.deepseek.com/v1';
-  const DEFAULT_MODEL = 'deepseek-chat';
+  const DEFAULT_MODEL = 'deepseek-v4-flash';
   /** 直接调用用户自填的 OpenAI 兼容接口。
    * @param {Array<{role:string,content:string}>} messages
    * @param {object} opts { temperature, max_tokens }
@@ -27,6 +30,13 @@ window.LLM = (function () {
       temperature: opts && opts.temperature != null ? opts.temperature : 0.7,
       max_tokens: opts && opts.max_tokens != null ? opts.max_tokens : 1200,
     };
+    // DeepSeek V4 默认开启「思考模式」，会把大量 completion_tokens 烧在内部推理上，
+    // 同时官方明确警告：在思考模式下 response_format: json_object 容易触发空白字符循环
+    // （「模型可能会生成不断的空白字符，直到生成达到令牌限制，从而导致请求长时间运行并显得卡住」，
+    //  来源：https://api-docs.deepseek.com/zh-cn/api/create-chat-completion）。
+    // 因此所有任务都显式关闭思考模式，让 temperature/JSON 模式正常工作、输出稳定可读。
+    // 关闭思考后 temperature/top_p 才真正生效（官方：思考模式下这些参数被忽略）。
+    body.thinking = { type: 'disabled' };
     // 结构化输出任务（备课 / 总结 / 闪卡）：从协议层强制模型只输出合法 JSON 对象，
     // 彻底杜绝模型在长对话历史里被「苏格拉底导师」角色带偏、输出口语化文本而非 JSON。
     // 注意：json_object 模式要求顶层必须是对象，故闪卡提示词已改为 {"flashcards":[...]} 包裹形式；
