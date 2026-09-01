@@ -188,7 +188,12 @@ ${ctx}${kpBlock}输出严格的 JSON（不要任何解释文字、不要 markdow
   - mastered / weak / nextSteps / keyPoints 用具体、可理解的方式表述，侧重"学员理解了什么、还差哪一步"，不必堆砌术语名称；如确需写术语，请紧跟一句通俗解释（如"牛顿第二定律 F=ma（物体受力越大、加速度越大）"）。
   - mastered/weak/nextSteps/keyPoints 至少各 1 条；pendingQuestion 必须填写，优先使用【本节课最后一问】，若无则根据窗口内容提炼一个自然的续接问题。
   - pendingQuestion 只保留问题本身，不要舞台提示、参考注脚、斜体旁白。
-  - kpStatus：仅填写你确有把握的、且属于上方【本节课窗口知识点清单】中的 KP id，值为 "mastered" 或 "weak"。不确定可不填；禁止编造清单外的 id。这条用于精细进度跟踪，比 mastered/weak 文本匹配更可靠，请尽量填写。`;
+  - kpStatus（进度跟踪，务必保守，宁缺毋滥）：只标注你**在本次对话中确实看到学员掌握或暴露出问题**的知识点，值只能是 "mastered" 或 "weak"；id 必须来自上方【本节课窗口知识点清单】，禁止编造清单外的 id。
+    · mastered 的硬性判据（必须满足，否则不得标）：对话里学员就该知识点给出过**正确回答 / 正确解释 / 可被验证的正确运用**。
+      仅仅因为老师在讲、或该知识点属于本窗口范围，**绝不能**标 mastered。
+    · 本次对话**从未涉及**的知识点：一律**不填**，让它保持"未学习"状态。不要因为它在窗口内就顺手标记。
+    · 学员接触过但仍含糊、答错、或只是听老师讲过：标 "weak"，**不要**标 mastered。
+    · 若本次对话几乎没有实质问答（例如只有开场白、学员未作答），kpStatus 应输出空对象 {}。`;
   }
 
   function buildFlashcardSystem({ currentWindow = null, targetCount = 10, outlineMode = false } = {}) {

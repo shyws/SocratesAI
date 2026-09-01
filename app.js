@@ -179,6 +179,8 @@ function parseHash() {
   if (parts[0] === 'textbooks' && parts.length === 2) return { name: 'textbook', tbId: parts[1] };
   if (parts[0] === 'textbooks' && parts[2] === 'courses' && parts.length === 4) return { name: 'lesson', tbId: parts[1], courseId: parts[3] };
   if (parts[0] === 'textbooks' && parts[2] === 'courses' && parts[4] === 'review') return { name: 'review', tbId: parts[1], courseId: parts[3] };
+  if (parts[0] === 'review' && parts.length === 1) return { name: 'reviewhub' };
+  if (parts[0] === 'review' && parts.length === 2) return { name: 'tbreview', tbId: parts[1] };
   if (parts[0] === 'settings') return { name: 'settings' };
   return { name: 'dashboard' };
 }
@@ -189,13 +191,15 @@ function setActiveNav(route) {
 
 async function router() {
   const r = parseHash();
-  setActiveNav('/' + (r.name === 'dashboard' ? '' : r.name === 'textbooks' ? 'textbooks' : r.name === 'settings' ? 'settings' : ''));
+  setActiveNav('/' + (r.name === 'dashboard' ? '' : r.name === 'textbooks' ? 'textbooks' : r.name === 'settings' ? 'settings' : (r.name === 'reviewhub' || r.name === 'tbreview') ? 'review' : ''));
   try {
     if (r.name === 'dashboard') await renderDashboard();
     else if (r.name === 'textbooks') await renderTextbooks();
     else if (r.name === 'textbook') await renderTextbook(r.tbId);
     else if (r.name === 'lesson') await renderLesson(r.tbId, r.courseId);
     else if (r.name === 'review') await renderReview(r.tbId, r.courseId);
+    else if (r.name === 'reviewhub') await renderReviewHub();
+    else if (r.name === 'tbreview') await renderTextbookReview(r.tbId);
     else if (r.name === 'settings') await renderSettings();
   } catch (e) {
     app().innerHTML = `<div class="card">加载失败：${esc(e.message)}</div>`;
@@ -218,17 +222,20 @@ async function renderDashboard() {
   if (dueItems.length) {
     html += `<div class="card"><h3>🔔 待复习提醒</h3>`;
     dueItems.forEach((d) => {
-      html += `<div class="item"><div><div class="title">《${esc(d.title)}》</div><div class="meta">有 ${d.due} 张闪卡待复习（共 ${d.total} 张）</div></div><div class="spacer"></div><a class="btn ghost" href="#/textbooks/${d.textbookId}">去复习</a></div>`;
+      html += `<div class="item"><div><div class="title">《${esc(d.title)}》</div><div class="meta">有 ${d.due} 张闪卡待复习（共 ${d.total} 张）</div></div><div class="spacer"></div><a class="btn ghost" href="#/review/${d.textbookId}">去复习</a></div>`;
     });
     html += `</div>`;
   }
   state.textbooks.forEach((tb) => {
     const d = dueMap[tb.id];
     const active = tb.courses.filter((c) => c.status === 'active').length;
+    const _ks = (tb.progress && tb.progress.kpStatus) || {};
+    const _m = Object.values(_ks).filter((s) => s === 'mastered').length;
+    const _w = Object.values(_ks).filter((s) => s === 'weak').length;
     html += `<div class="card">
       <div class="row"><div class="title">《${esc(tb.title)}》</div><div class="spacer"></div>
       <a class="btn ghost" href="#/textbooks/${tb.id}">打开</a></div>
-      <div class="meta">阶段 ${tb.progress.stage} ｜ 已掌握 ${tb.progress.mastered.length} ｜ 薄弱 ${tb.progress.weak.length} ｜ 进行中课程 ${active} ｜ 课程 ${tb.courses.length}</div>
+      <div class="meta">阶段 ${tb.progress.stage} ｜ 已掌握 ${_m} ｜ 薄弱 ${_w} ｜ 进行中课程 ${active} ｜ 课程 ${tb.courses.length}</div>
       ${d && d.due > 0 ? `<div class="pill warn">${d.due} 张待复习</div>` : ''}
     </div>`;
   });
@@ -480,7 +487,7 @@ async function renderTextbook(tbId) {
 
   let html = `<div class="row"><a class="btn ghost" href="#/textbooks">← 教材库</a><div class="spacer"></div></div>
   <h2>《${esc(tb.title)}》${isOutline ? ' <span class="pill">🗂 大纲模式（无教材正文）</span>' : ''}</h2>
-  ${tbDue && tbDue.due > 0 ? `<div class="review-reminder">🔔 本教材有 <b>${tbDue.due}</b> 张闪卡已到期待复习（共 ${tbDue.total} 张）。进入任意课程的「总结/闪卡」页点「开始复习」即可巩固。</div>` : ''}
+  ${tbDue && tbDue.due > 0 ? `<div class="review-reminder">🔔 本教材有 <b>${tbDue.due}</b> 张闪卡已到期待复习（共 ${tbDue.total} 张）。<a class="btn ghost" style="margin-left:8px" href="#/review/${tbId}">去复习页</a></div>` : ''}
   <div class="card">
     <h3>每教材人设覆盖（可选，覆盖全局默认人设）</h3>
     <textarea id="po" placeholder="例如：用严谨推导风，多追问公式来源；可不填，留空则沿用全局人设">${esc(tb.personaOverride || '')}</textarea>
@@ -490,6 +497,10 @@ async function renderTextbook(tbId) {
     <h3>📐 备课与教材进度</h3>
     <div class="muted" style="margin-bottom:10px">${prepStatusText}</div>
     ${renderProgressGrid(tb)}
+    <div class="row" style="margin-top:10px;align-items:center">
+      <button id="repair-progress" class="ghost">🔧 修复历史进度（重放各课对话校正掌握度）</button>
+      <span class="muted" id="repair-msg"></span>
+    </div>
     ${isOutline
       ? `<div id="prep-controls" class="row" style="margin-top:12px;align-items:flex-start">
           <div class="muted" style="flex:1">本教材由导入的三级大纲构成，无需 AI 备课。可新建课程直接上课；如需调整结构，点击「重新导入大纲」。</div>
@@ -585,6 +596,26 @@ async function renderTextbook(tbId) {
       if (!confirm('清除备课单元与进度？教材正文与课程保持不变。')) return;
       Store.cancelPrep(tbId);
       renderTextbook(tbId);
+    };
+  }
+  const repairBtn = $('#repair-progress');
+  if (repairBtn) {
+    repairBtn.onclick = async () => {
+      if (!confirm('重放该教材各节课的真实对话，把「无证据却标成已掌握」的知识点降级为薄弱，并重新计算进度窗口？\n（该操作只下行收敛、不会误删你真学会的内容；执行后可刷新查看校正后的进度。）')) return;
+      repairBtn.disabled = true; $('#repair-msg').textContent = '正在重放各课对话并校正进度…';
+      try {
+        const r = Store.repairProgress(tbId);
+        if (!r.repaired) { $('#repair-msg').textContent = '无法修复：' + (r.reason || '未知原因'); }
+        else {
+          const w = r.progress && Store.getCurrentWindow(Store.getState().textbooks.find((t) => t.id === tbId));
+          const unitHint = w && w.unitIndex >= 0 ? `当前教学窗口回到第 ${w.unitIndex + 1} 单元` : '教材已标记为全部掌握';
+          $('#repair-msg').textContent = `完成：重放 ${r.coursesReplayed} 课，降级 ${r.downgraded} 个虚标掌握 → ${unitHint}。`;
+        }
+        setTimeout(() => renderTextbook(tbId), 1200);
+      } catch (e) {
+        $('#repair-msg').textContent = '修复失败：' + e.message;
+        repairBtn.disabled = false;
+      }
     };
   }
 
@@ -688,6 +719,7 @@ async function renderLesson(tbId, courseId) {
       <div class="muted">课后总结与闪卡已生成，可点下方查看；新一轮课程会自动从本次遗留问题续接。</div>
       <div class="row" style="margin-top:10px">
         <a class="btn ghost" href="#/textbooks/${tbId}/courses/${courseId}/review">查看总结 / 闪卡</a>
+        <a class="btn ghost" href="#/review/${tbId}">全部闪卡复习</a>
         <button id="new-course" class="primary">新建课程（续接上次问题）</button>
         <button id="del-course" class="danger">删除课程</button>
       </div>
@@ -896,126 +928,214 @@ async function renderReview(tbId, courseId) {
   };
 
   $('#review-mode').onclick = () => {
-    const all = course.flashcards;
-    if (!all.length) return alert('还没有闪卡，请先点「生成/重生成闪卡」');
-    // 复习状态：全部闪卡连续可练；已作答计入进度（参考 AI 题库小程序的点击式交互）
-    // correct：记录每题对错，用于答题卡（底部编号）红/绿框区分
-    // 到期卡（due<=now）优先排列，让用户先巩固该复习的内容
-    const now = Date.now();
-    const ordered = all.slice().sort((a, b) => (new Date(a.due).getTime() <= now ? 0 : 1) - (new Date(b.due).getTime() <= now ? 0 : 1));
-    const rs = { tbId, courseId, cards: ordered, index: 0, answered: {}, correct: {}, multi: {} };
-    const getCard = () => rs.cards[rs.index];
-
-    function renderCard() {
-      const f = getCard();
-      if (!f) return;
-      const total = rs.cards.length;
-      const answeredCount = Object.keys(rs.answered).length;
-      const pct = Math.round(answeredCount / total * 100);
-      const opts = (Array.isArray(f.options) ? f.options : []).map((o) => {
-        const m = String(o).match(/^\s*([A-Da-d])\s*[.、)．]?\s*([\s\S]*)$/);
-        return { label: m ? m[1].toUpperCase() : '', content: m ? m[2].trim() : String(o) };
-      });
-      const correctSet = f.type === 'multiple'
-        ? new Set((f.correctKeys || []).map((k) => String(k).toUpperCase()))
-        : new Set([String(f.correctKey || '').toUpperCase()]);
-      const userAns = rs.answered[f.id];
-      const hasAnswered = userAns !== undefined;
-      const tempSel = rs.multi[f.id] || [];
-
-      const optCls = (o) => {
-        const isSel = f.type === 'multiple' ? tempSel.includes(o.label) : (userAns === o.label);
-        const isCorrect = correctSet.has(o.label);
-        if (hasAnswered) {
-          if (isCorrect) return 'fc-opt fc-correct';
-          if (isSel && !isCorrect) return 'fc-opt fc-wrong';
-          return 'fc-opt fc-dim';
-        }
-        if (isSel) return 'fc-opt fc-sel';
-        return 'fc-opt fc-click';
-      };
-
-      const optsHtml = opts.map((o) => `<div class="${optCls(o)}" data-label="${o.label}">
-        <span class="fc-opt-label">${o.label}</span>
-        <span class="fc-opt-content">${esc(o.content)}</span>
-        ${hasAnswered && correctSet.has(o.label) ? '<span class="fc-opt-icon">✓</span>' : ''}
-        ${hasAnswered && (f.type === 'multiple' ? tempSel.includes(o.label) : userAns === o.label) && !correctSet.has(o.label) ? '<span class="fc-opt-icon">✗</span>' : ''}
-      </div>`).join('');
-
-      const jumpHtml = rs.cards.map((c, i) => {
-        let stateCls;
-        if (i === rs.index) stateCls = 'fc-jump-cur';
-        else if (rs.answered[c.id] !== undefined) stateCls = rs.correct[c.id] ? 'fc-jump-done' : 'fc-jump-wrong';
-        else stateCls = '';
-        return `<button class="fc-jump ${stateCls}" data-idx="${i}">${i + 1}</button>`;
-      }).join('');
-      const expHtml = hasAnswered && f.explanation ? `<div class="fc-exp">📝 解析：${renderMD(f.explanation)}</div>` : '';
-      const box = $('#fc-list');
-      box.innerHTML = `<div class="fc-review">
-        <div class="fc-progress"><div class="fc-progress-bar" style="width:${pct}%"></div></div>
-        <div class="fc-review-top">
-          <span class="fc-progress-text">第 ${rs.index + 1} / ${total} 题 · 已答 ${answeredCount}</span>
-          <span class="pill">${f.type === 'multiple' ? '多选题' : '单选题'}</span>
-          <button class="ghost fc-fav" data-id="${f.id}">${f.favorite ? '★ 已收藏' : '☆ 收藏'}</button>
-          <button class="ghost fc-exit">退出复习</button>
-        </div>
-        <div class="fc-q">${esc(f.question)}</div>
-        <div class="fc-opts">${optsHtml}</div>
-        ${expHtml}
-        ${f.type === 'multiple' && !hasAnswered ? `<button class="primary fc-confirm">✓ 确认答案（已选 ${tempSel.length} 个）</button>` : ''}
-        <div class="fc-nav">
-          <button class="ghost fc-prev" ${rs.index === 0 ? 'disabled' : ''}>← 上一题</button>
-          <div class="fc-jumps">${jumpHtml}</div>
-          <button class="primary fc-next" ${rs.index === total - 1 ? 'disabled' : ''}>下一题 →</button>
-        </div>
-      </div>`;
-
-      $all('.fc-opt', box).forEach((el) => el.onclick = () => {
-        const label = el.dataset.label;
-        if (f.type === 'multiple') {
-          if (rs.answered[f.id] !== undefined) return;
-          const arr = rs.multi[f.id] || [];
-          const i = arr.indexOf(label);
-          if (i >= 0) arr.splice(i, 1); else arr.push(label);
-          rs.multi[f.id] = arr;
-          renderCard();
-        } else {
-          if (rs.answered[f.id] !== undefined) return;
-          const correct = label === String(f.correctKey || '').toUpperCase();
-          rs.answered[f.id] = label;
-          rs.correct[f.id] = correct;
-          Store.reviewFlashcard(tbId, courseId, f.id, correct ? 2 : 1);
-          renderCard();
-        }
-      });
-      const confirmBtn = $('.fc-confirm', box);
-      if (confirmBtn) confirmBtn.onclick = () => {
-        const arr = rs.multi[f.id] || [];
-        if (!arr.length) { alert('请至少选择一个选项'); return; }
-        const correctSet2 = new Set((f.correctKeys || []).map((k) => String(k).toUpperCase()).sort());
-        const userSet2 = new Set(arr.slice().sort().map((k) => k.toUpperCase()));
-        const correct = correctSet2.size === userSet2.size && [...correctSet2].every((k) => userSet2.has(k));
-        rs.answered[f.id] = arr.slice().sort().join(',');
-        rs.correct[f.id] = correct;
-        Store.reviewFlashcard(tbId, courseId, f.id, correct ? 2 : 1);
-        renderCard();
-      };
-      $('.fc-prev', box).onclick = () => { if (rs.index > 0) { rs.index--; renderCard(); } };
-      $('.fc-next', box).onclick = () => { if (rs.index < total - 1) { rs.index++; renderCard(); } };
-      $all('.fc-jump', box).forEach((b) => b.onclick = () => { rs.index = parseInt(b.dataset.idx, 10); renderCard(); });
-      $('.fc-fav', box).onclick = () => {
-        Store.toggleFlashcardFavorite(tbId, courseId, f.id);
-        f.favorite = !f.favorite;
-        renderCard();
-      };
-      $('.fc-exit', box).onclick = () => { renderReview(tbId, courseId); };
-    }
-    renderCard();
+    const all = course.flashcards.map((f) => Object.assign({}, f, { _courseId: courseId }));
+    startFlashcardSession(all, tbId, '#/textbooks/' + tbId + '/courses/' + courseId + '/review');
   };
 
   $('#exp-md').onclick = () => download(course.title + '.md', buildExportMD(course, tb), 'text/markdown');
   $('#exp-anki').onclick = () => download(course.title + '.tsv', buildExportAnki(course), 'text/plain');
   $('#exp-pdf').onclick = () => exportPDF(course, tb.title);
+}
+
+/* ----------------- 通用闪卡复习播放器（可复用于：单课程 / 单教材全部 / 待复习 / 单次课程） ----------------- */
+// cards: 闪卡数组，每张需带 _courseId（用于 SM-2 回写）。tbId：所属教材。exitHash：退出后返回的哈希路由。
+function startFlashcardSession(cards, tbId, exitHash) {
+  if (!cards || !cards.length) { alert('该范围下还没有闪卡。'); return; }
+  const now = Date.now();
+  // 到期卡（due<=now）优先排列，先巩固该复习的内容
+  const ordered = cards.slice().sort((a, b) => (new Date(a.due).getTime() <= now ? 0 : 1) - (new Date(b.due).getTime() <= now ? 0 : 1));
+  app().innerHTML = `<div class="row"><a class="btn ghost" id="fc-exit-all">← 返回</a><div class="spacer"></div></div>
+  <h2>闪卡复习</h2>
+  <div class="card"><div id="fc-list"></div></div>`;
+  $('#fc-exit-all').onclick = () => { location.hash = exitHash || '#/review'; };
+  const rs = { tbId, cards: ordered, index: 0, answered: {}, correct: {}, multi: {} };
+  const getCard = () => rs.cards[rs.index];
+
+  function renderCard() {
+    const f = getCard();
+    if (!f) return;
+    const total = rs.cards.length;
+    const answeredCount = Object.keys(rs.answered).length;
+    const pct = Math.round(answeredCount / total * 100);
+    const opts = (Array.isArray(f.options) ? f.options : []).map((o) => {
+      const m = String(o).match(/^\s*([A-Da-d])\s*[.、)．]?\s*([\s\S]*)$/);
+      return { label: m ? m[1].toUpperCase() : '', content: m ? m[2].trim() : String(o) };
+    });
+    const correctSet = f.type === 'multiple'
+      ? new Set((f.correctKeys || []).map((k) => String(k).toUpperCase()))
+      : new Set([String(f.correctKey || '').toUpperCase()]);
+    const userAns = rs.answered[f.id];
+    const hasAnswered = userAns !== undefined;
+    const tempSel = rs.multi[f.id] || [];
+
+    const optCls = (o) => {
+      const isSel = f.type === 'multiple' ? tempSel.includes(o.label) : (userAns === o.label);
+      const isCorrect = correctSet.has(o.label);
+      if (hasAnswered) {
+        if (isCorrect) return 'fc-opt fc-correct';
+        if (isSel && !isCorrect) return 'fc-opt fc-wrong';
+        return 'fc-opt fc-dim';
+      }
+      if (isSel) return 'fc-opt fc-sel';
+      return 'fc-opt fc-click';
+    };
+
+    const optsHtml = opts.map((o) => `<div class="${optCls(o)}" data-label="${o.label}">
+      <span class="fc-opt-label">${o.label}</span>
+      <span class="fc-opt-content">${esc(o.content)}</span>
+      ${hasAnswered && correctSet.has(o.label) ? '<span class="fc-opt-icon">✓</span>' : ''}
+      ${hasAnswered && (f.type === 'multiple' ? tempSel.includes(o.label) : userAns === o.label) && !correctSet.has(o.label) ? '<span class="fc-opt-icon">✗</span>' : ''}
+    </div>`).join('');
+
+    const jumpHtml = rs.cards.map((c, i) => {
+      let stateCls;
+      if (i === rs.index) stateCls = 'fc-jump-cur';
+      else if (rs.answered[c.id] !== undefined) stateCls = rs.correct[c.id] ? 'fc-jump-done' : 'fc-jump-wrong';
+      else stateCls = '';
+      return `<button class="fc-jump ${stateCls}" data-idx="${i}">${i + 1}</button>`;
+    }).join('');
+    const expHtml = hasAnswered && f.explanation ? `<div class="fc-exp">📝 解析：${renderMD(f.explanation)}</div>` : '';
+    const box = $('#fc-list');
+    box.innerHTML = `<div class="fc-review">
+      <div class="fc-progress"><div class="fc-progress-bar" style="width:${pct}%"></div></div>
+      <div class="fc-review-top">
+        <span class="fc-progress-text">第 ${rs.index + 1} / ${total} 题 · 已答 ${answeredCount}</span>
+        <span class="pill">${f.type === 'multiple' ? '多选题' : '单选题'}</span>
+        <button class="ghost fc-fav" data-id="${f.id}">${f.favorite ? '★ 已收藏' : '☆ 收藏'}</button>
+        <button class="ghost fc-exit">退出复习</button>
+      </div>
+      <div class="fc-q">${esc(f.question)}</div>
+      <div class="fc-opts">${optsHtml}</div>
+      ${expHtml}
+      ${f.type === 'multiple' && !hasAnswered ? `<button class="primary fc-confirm">✓ 确认答案（已选 ${tempSel.length} 个）</button>` : ''}
+      <div class="fc-nav">
+        <button class="ghost fc-prev" ${rs.index === 0 ? 'disabled' : ''}>← 上一题</button>
+        <div class="fc-jumps">${jumpHtml}</div>
+        <button class="primary fc-next" ${rs.index === total - 1 ? 'disabled' : ''}>下一题 →</button>
+      </div>
+    </div>`;
+
+    $all('.fc-opt', box).forEach((el) => el.onclick = () => {
+      const label = el.dataset.label;
+      if (f.type === 'multiple') {
+        if (rs.answered[f.id] !== undefined) return;
+        const arr = rs.multi[f.id] || [];
+        const i = arr.indexOf(label);
+        if (i >= 0) arr.splice(i, 1); else arr.push(label);
+        rs.multi[f.id] = arr;
+        renderCard();
+      } else {
+        if (rs.answered[f.id] !== undefined) return;
+        const correct = label === String(f.correctKey || '').toUpperCase();
+        rs.answered[f.id] = label;
+        rs.correct[f.id] = correct;
+        Store.reviewFlashcard(tbId, f._courseId, f.id, correct ? 2 : 1);
+        renderCard();
+      }
+    });
+    const confirmBtn = $('.fc-confirm', box);
+    if (confirmBtn) confirmBtn.onclick = () => {
+      const arr = rs.multi[f.id] || [];
+      if (!arr.length) { alert('请至少选择一个选项'); return; }
+      const correctSet2 = new Set((f.correctKeys || []).map((k) => String(k).toUpperCase()).sort());
+      const userSet2 = new Set(arr.slice().sort().map((k) => k.toUpperCase()));
+      const correct = correctSet2.size === userSet2.size && [...correctSet2].every((k) => userSet2.has(k));
+      rs.answered[f.id] = arr.slice().sort().join(',');
+      rs.correct[f.id] = correct;
+      Store.reviewFlashcard(tbId, f._courseId, f.id, correct ? 2 : 1);
+      renderCard();
+    };
+    $('.fc-prev', box).onclick = () => { if (rs.index > 0) { rs.index--; renderCard(); } };
+    $('.fc-next', box).onclick = () => { if (rs.index < total - 1) { rs.index++; renderCard(); } };
+    $all('.fc-jump', box).forEach((b) => b.onclick = () => { rs.index = parseInt(b.dataset.idx, 10); renderCard(); });
+    $('.fc-fav', box).onclick = () => {
+      Store.toggleFlashcardFavorite(tbId, f._courseId, f.id);
+      f.favorite = !f.favorite;
+      renderCard();
+    };
+    $('.fc-exit', box).onclick = () => { location.hash = exitHash || '#/review'; };
+  }
+  renderCard();
+}
+
+/* ----------------- 闪卡复习：总览（按教材划分） ----------------- */
+async function renderReviewHub() {
+  const state = Store.getState();
+  const now = Date.now();
+  const items = state.textbooks.map((tb) => {
+    let total = 0, due = 0;
+    tb.courses.forEach((c) => (c.flashcards || []).forEach((f) => { total++; if (new Date(f.due).getTime() <= now) due++; }));
+    return { tb, total, due };
+  }).filter((x) => x.total > 0);
+
+  let html = `<div class="row"><a class="btn ghost" href="#/">← 仪表盘</a><div class="spacer"></div></div>
+  <h2>闪卡复习</h2>`;
+  if (!items.length) {
+    html += `<div class="card muted">还没有任何闪卡。先去「教材库」上课，下课后会自动生成闪卡。</div>`;
+  } else {
+    html += `<div class="muted" style="margin-bottom:10px">按教材划分的闪卡库。点击下方教材进入后，可复习该教材的：<b>全部闪卡</b> / <b>待复习闪卡</b> / <b>单次课程闪卡</b>。</div>`;
+    html += items.map(({ tb, total, due }) => `<div class="item">
+      <div><div class="title">《${esc(tb.title)}》</div>
+      <div class="meta">共 ${total} 张闪卡${due > 0 ? ` ｜ <span class="pill warn">${due} 张待复习</span>` : ''}</div></div>
+      <div class="spacer"></div>
+      <a class="btn" href="#/review/${tb.id}">进入复习</a>
+    </div>`).join('');
+  }
+  app().innerHTML = html;
+}
+
+/* ----------------- 闪卡复习：单教材（全部 / 待复习 / 单次课程） ----------------- */
+async function renderTextbookReview(tbId) {
+  const state = Store.getState();
+  const tb = state.textbooks.find((t) => t.id === tbId);
+  if (!tb) return (app().innerHTML = `<div class="card">教材不存在</div>`);
+  // 汇总该教材全部闪卡，并携带所属课程 id（SM-2 回写需要）
+  const allCards = [];
+  tb.courses.forEach((c) => (c.flashcards || []).forEach((f) => allCards.push(Object.assign({}, f, { _courseId: c.id, _courseTitle: c.title }))));
+  const now = Date.now();
+  const dueCards = allCards.filter((f) => new Date(f.due).getTime() <= now);
+
+  let html = `<div class="row"><a class="btn ghost" href="#/review">← 复习总览</a><div class="spacer"></div></div>
+  <h2>《${esc(tb.title)}》· 闪卡复习</h2>`;
+  if (!allCards.length) {
+    html += `<div class="card muted">该教材还没有闪卡。先去教材里上课，下课后会自动生成闪卡。</div>`;
+    app().innerHTML = html;
+    return;
+  }
+  html += `<div class="card">
+    <div class="row" style="gap:10px;flex-wrap:wrap">
+      <button class="primary" id="rev-all">全部闪卡（${allCards.length}）</button>
+      <button class="primary" id="rev-due" ${dueCards.length ? '' : 'disabled'}>待复习（${dueCards.length}）</button>
+    </div>
+    <div class="muted" style="margin-top:8px">选择复习范围：点「全部闪卡」复习该教材所有题目；点「待复习」只练已到期的题目；或在下方按单次课程挑选。</div>
+  </div>
+  <div class="card">
+    <h3>按单次课程复习</h3>
+    <div id="course-list"></div>
+  </div>`;
+  app().innerHTML = html;
+
+  $('#rev-all').onclick = () => startFlashcardSession(allCards, tbId, '#/review/' + tbId);
+  $('#rev-due').onclick = () => { if (dueCards.length) startFlashcardSession(dueCards, tbId, '#/review/' + tbId); };
+
+  const box = $('#course-list');
+  const coursesWithFc = tb.courses.filter((c) => (c.flashcards || []).length);
+  if (!coursesWithFc.length) { box.innerHTML = `<div class="muted">该教材下的课程都还没有生成闪卡。</div>`; return; }
+  box.innerHTML = coursesWithFc.map((c) => {
+    const due = (c.flashcards || []).filter((f) => new Date(f.due).getTime() <= now).length;
+    return `<div class="item">
+      <div><div class="title">${esc(c.title)}</div>
+      <div class="meta">共 ${(c.flashcards || []).length} 张${due > 0 ? ` ｜ <span class="pill warn">${due} 张待复习</span>` : ''}</div></div>
+      <div class="spacer"></div>
+      <button class="btn" data-cid="${c.id}">复习本课</button>
+    </div>`;
+  }).join('');
+  $all('[data-cid]', box).forEach((b) => b.onclick = () => {
+    const cid = b.dataset.cid;
+    const cards = (tb.courses.find((c) => c.id === cid).flashcards || []).map((f) => Object.assign({}, f, { _courseId: cid }));
+    if (!cards.length) return alert('该课程没有闪卡');
+    startFlashcardSession(cards, tbId, '#/review/' + tbId);
+  });
 }
 
 function buildExportMD(course, tb) {

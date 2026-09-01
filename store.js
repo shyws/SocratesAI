@@ -210,8 +210,11 @@ window.Store = (function () {
   function cancelPrep(tbId) { return setPrep(tbId, null); }
 
   /* ---------------- 进度窗口 ---------------- */
-  // KP 级进度辅助：hasKps=是否有知识点数据；allResolved=所有 KP 均为 mastered/weak；
-  // nextKpUnitIndex=第一个未掌握 KP 所属 unit（用于把教学窗口推进到该 unit）。
+  // KP 级进度辅助：hasKps=是否有知识点数据；allResolved=所有 KP 均为 mastered；
+  // nextKpUnitIndex=第一个未掌握(非 mastered) KP 所属 unit（用于把教学窗口推进到该 unit）。
+  // 关键一致性约束：只把 mastered 视为"已解决"，weak 与 unlearned 都算"未完成/待巩固"。
+  // 这样进度小方格的"下一步"与上课窗口使用同一判定，窗口不会因 weak 被误判为已完成而跳过薄弱单元，
+  // 避免"显示卡在薄弱点、但上课内容已跳到后面单元"的错位（详见 2.18 台账）。
   function kpProgressInfo(tb) {
     const kps = tb.prep && Array.isArray(tb.prep.knowledgePoints) ? tb.prep.knowledgePoints : [];
     const status = (tb.progress && tb.progress.kpStatus) || {};
@@ -220,7 +223,8 @@ window.Store = (function () {
     let nextKpUnitIndex = -1;
     for (let i = 0; i < kps.length; i++) {
       const st = status[kps[i].id];
-      if (st === 'mastered' || st === 'weak') continue;
+      // 仅 mastered 视为已解决；weak / unlearned 都视为"待巩固/未完成"
+      if (st === 'mastered') continue;
       allResolved = false;
       if (nextKpUnitIndex < 0) nextKpUnitIndex = (kps[i].unitIndex != null ? kps[i].unitIndex : 0);
     }
@@ -231,17 +235,21 @@ window.Store = (function () {
     const n = (tb.chunks || []).length;
     if (!isOutline && !n) return null;
     const info = kpProgressInfo(tb);
-    // KP 已全部 resolved（mastered/weak）→ 视为学完，返回 null（UI 显示"✅ 已完成"）。
-    // 单 unit 教材（如 SSD/BSP，全书=1 个 unit）因此不会在第 1 节课后被误判"完成"，而是继续围绕未掌握 KP 推进。
+    // KP 已全部 mastered → 视为学完，返回 null（UI 显示"✅ 已完成"）。
+    // 注意：weak 不再算"已完成"，故含薄弱点的教材不会被判为学完。
     if (info.hasKps && info.allResolved) return null;
-    if (tb.progress && tb.progress.currentWindow && !tb.progress.completedAll) return tb.progress.currentWindow;
     const prep = tb.prep;
     if (prep && prep.status === 'completed' && Array.isArray(prep.units) && prep.units.length) {
-      const covered = new Set(tb.progress.coveredUnitIndices || []);
-      // 优先推进到"下一个未掌握 KP 所在 unit"；否则退回首个未 covered 的 unit。
-      let unitIndex = prep.units.findIndex((_, i) => !covered.has(i));
-      if (unitIndex < 0) unitIndex = prep.units.length - 1;
-      if (info.hasKps && info.nextKpUnitIndex >= 0) unitIndex = info.nextKpUnitIndex;
+      // 每次实时按 kpStatus 重算窗口（不再返回可能被旧逻辑写歪的缓存 currentWindow），
+      // 保证"进度小方格的下一步"与"上课窗口"永远指向同一个单元，消除显示与上课内容错位。
+      let unitIndex;
+      if (info.hasKps && info.nextKpUnitIndex >= 0) {
+        unitIndex = info.nextKpUnitIndex; // 第一个未掌握(非 mastered) KP 所在单元
+      } else {
+        const covered = new Set(tb.progress.coveredUnitIndices || []);
+        unitIndex = prep.units.findIndex((_, i) => !covered.has(i));
+        if (unitIndex < 0) unitIndex = prep.units.length - 1;
+      }
       if (isOutline) {
         return { startChunk: unitIndex, endChunk: unitIndex, unitIndex };
       }
@@ -270,29 +278,29 @@ window.Store = (function () {
     const info = kpProgressInfo(tb);
     const isOutline = tb.mode === 'outline';
     const n = tb.chunks.length;
-    let nextIdx = -1;
-    if (prep && prep.status === 'completed' && Array.isArray(prep.units) && prep.units.length) {
-      nextIdx = prep.units.findIndex((_, i) => !covered.has(i));
-      if (nextIdx < 0) nextIdx = prep.units.length - 1;
-    }
-    tb.progress.coveredUnitIndices = Array.from(covered);
-    tb.progress.currentUnitIndex = nextIdx;
-    // 完成判定：优先以 KP 是否全部 resolved（mastered/weak）为准；无 KP 数据时退回 unit 覆盖判定。
-    // 单 unit 教材（如 SSD/BSP，全书=1 个 unit）不会在第 1 节课后就被误判"完成"，
-    // 而是继续围绕未掌握 KP 推进，直到所有 KP 都 mastered/weak 才标记 completedAll。
-    const done = info.hasKps ? info.allResolved : (nextIdx < 0);
-    if (done) {
-      tb.progress.completedAll = true;
-      tb.progress.currentWindow = { startChunk: 0, endChunk: isOutline ? 0 : Math.max(0, n - 1), unitIndex: -1 };
+    let unitIndex;
+    if (info.hasKps && info.nextKpUnitIndex >= 0) {
+      // 真实窗口单元 = 第一个非 mastered KP 所在单元（与进度小方格"下一步"同一判定），
+      // 窗口停在当前单元、围绕薄弱点巩固，直到该单元全部 mastered 才推进到下一单元。
+      unitIndex = info.nextKpUnitIndex;
+    } else if (prep && prep.status === 'completed' && Array.isArray(prep.units) && prep.units.length) {
+      unitIndex = prep.units.findIndex((_, i) => !covered.has(i));
+      if (unitIndex < 0) unitIndex = prep.units.length - 1;
     } else {
-      tb.progress.completedAll = false;
-      const unitIndex = (info.hasKps && info.nextKpUnitIndex >= 0) ? info.nextKpUnitIndex : nextIdx;
-      if (isOutline) {
-        tb.progress.currentWindow = { startChunk: unitIndex, endChunk: unitIndex, unitIndex };
-      } else {
-        const u = prep.units[unitIndex];
-        tb.progress.currentWindow = { startChunk: Math.max(0, (u && u.startChunk) || 0), endChunk: Math.min(n - 1, (u && (u.endChunk ?? n - 1)) || n - 1), unitIndex };
-      }
+      unitIndex = -1;
+    }
+    // 完成判定：所有 KP 均已 mastered（weak 不算完成）；无 KP 数据时退回"无可用单元"。
+    const done = info.hasKps ? info.allResolved : (unitIndex < 0);
+    tb.progress.coveredUnitIndices = Array.from(covered);
+    tb.progress.currentUnitIndex = unitIndex; // 跟随真实窗口单元，便于"已覆盖单元"护栏
+    tb.progress.completedAll = done;
+    if (done) {
+      tb.progress.currentWindow = { startChunk: 0, endChunk: isOutline ? 0 : Math.max(0, n - 1), unitIndex: -1 };
+    } else if (isOutline) {
+      tb.progress.currentWindow = { startChunk: unitIndex, endChunk: unitIndex, unitIndex };
+    } else {
+      const u = prep.units[unitIndex];
+      tb.progress.currentWindow = { startChunk: Math.max(0, (u && u.startChunk) || 0), endChunk: Math.min(n - 1, (u && (u.endChunk ?? n - 1)) || n - 1), unitIndex };
     }
     save(); return tb.progress;
   }
@@ -303,6 +311,87 @@ window.Store = (function () {
     if (!tb.progress) tb.progress = {};
     tb.progress.kpStatus = Object.assign(tb.progress.kpStatus || {}, kpStatusMap);
     save(); return tb.progress.kpStatus;
+  }
+
+  /* ---- 对话证据判定（与 engine.endCourse 共用同一实现，避免两份逻辑漂移） ---- */
+  // 判断某知识点是否在"某段对话"中被真实讨论过（用于阻止"不论对话内容，每次下课都完成一个单元"）。
+  // 匹配策略（宽松，宁可放行也不误杀）：
+  //   ① 知识点标题整名出现在对话文本中；
+  //   ② 否则拆出核心词（英文/数字串、或 ≥2 字的中文串），命中过半即视为有证据。
+  // 返回有对话证据的 KP id 集合。
+  function kpEvidenceSet(kps, dialogueText) {
+    const text = String(dialogueText || '').toLowerCase();
+    const set = new Set();
+    if (!text.trim()) return set;
+    for (const kp of (kps || [])) {
+      const t = String((kp && kp.title) || '').trim().toLowerCase();
+      if (!t) continue;
+      if (text.includes(t)) { set.add(kp.id); continue; }
+      const toks = t.match(/[a-z0-9]{2,}|[一-鿿]{2,}/g) || [];
+      if (!toks.length) continue;
+      let hit = 0;
+      for (const tk of toks) if (text.includes(tk)) hit++;
+      if (hit / toks.length >= 0.5) set.add(kp.id);
+    }
+    return set;
+  }
+
+  /* ---- 进度修复：基于真实对话重放证据护栏，把虚标 mastered 降级为 weak ---- */
+  // 适用场景：2.19 之前版本"每下课不论对话内容都完成一单元"，导致 kpStatus 一次性被整单元标 mastered、虚高。
+  // 做法：逐课重放（用每课真实对话重新套证据护栏）→ 重新聚合 → advanceProgress 重算窗口。
+  // 安全属性：护栏只会降级（mastered→weak），不会升级，故重放是单向收敛的——
+  // 只会把"无证据却标成的掌握"压回来，绝不会误删学员真学会的内容。
+  // 已知边界：单课对话最多保留 60 轮，若相关讨论被截断，可能"该降未降"（偏宽松），不会"降错"。
+  function repairProgress(tbId) {
+    const tb = findTextbook(tbId); if (!tb) throw new Error('教材不存在');
+    const kps = tb.prep && Array.isArray(tb.prep.knowledgePoints) ? tb.prep.knowledgePoints : [];
+    if (!kps.length) return { repaired: false, reason: '该教材无知识点数据，无法修复' };
+    const before = tb.progress && tb.progress.kpStatus ? Object.assign({}, tb.progress.kpStatus) : {};
+    // 1) 逐课重放：用每课真实对话重新套证据护栏，得到"校正后"的 per-course kpStatus
+    const courseCorrected = (tb.courses || [])
+      .filter((c) => c && c.status === 'ended')
+      .map((course) => {
+        const summary = course.summary || {};
+        const dialogueText = (course.dialogues || []).map((d) => d.content || '').join('\n');
+        const evidence = kpEvidenceSet(kps, dialogueText);
+        const trustModel = evidence.size === 0; // 兜底：无任何匹配则信任模型，避免进度永卡
+        const canMaster = (id) => trustModel || evidence.has(id);
+        const corrected = {};
+        const apply = (id, st) => {
+          if (st === 'weak') { corrected[id] = 'weak'; return; }
+          if (st === 'mastered') corrected[id] = canMaster(id) ? 'mastered' : 'weak';
+        };
+        if (summary.kpStatus && typeof summary.kpStatus === 'object') {
+          Object.keys(summary.kpStatus).forEach((id) => apply(id, summary.kpStatus[id]));
+        }
+        // 兜底：旧字符串数组格式（mastered/weak 文本）
+        (summary.mastered || []).forEach((m) => {
+          kps.forEach((kp) => { if (kp.title.includes(m) || m.includes(kp.title)) apply(kp.id, 'mastered'); });
+        });
+        (summary.weak || []).forEach((w) => {
+          kps.forEach((kp) => { if (kp.title.includes(w) || w.includes(kp.title)) apply(kp.id, 'weak'); });
+        });
+        return corrected;
+      });
+    // 2) 聚合：mastered 优先（任一课有证据支撑的 mastered 即算掌握），否则 weak，否则视为 unlearned
+    const agg = {};
+    for (const corrected of courseCorrected) {
+      for (const id of Object.keys(corrected)) {
+        const st = corrected[id];
+        if (st === 'mastered') agg[id] = 'mastered';
+        else if (st === 'weak' && agg[id] !== 'mastered') agg[id] = 'weak';
+      }
+    }
+    // 3) 重算：仅写入聚合结果（未出现的 KP 视为 unlearned → 自动移除其旧的虚高 mastered），重置推进缓存
+    tb.progress = tb.progress || {};
+    tb.progress.kpStatus = agg;
+    tb.progress.coveredUnitIndices = [];
+    tb.progress.currentUnitIndex = -1;
+    save();
+    const after = advanceProgress(tbId);
+    const downgraded = Object.keys(before).filter((id) => before[id] === 'mastered' && agg[id] !== 'mastered').length;
+    const stillMastered = Object.keys(agg).filter((id) => agg[id] === 'mastered').length;
+    return { repaired: true, coursesReplayed: courseCorrected.length, downgraded, stillMastered, progress: after };
   }
 
   /* ---------------- 课程 ---------------- */
@@ -483,7 +572,7 @@ window.Store = (function () {
     createTextbook, updateTextbook, deleteTextbook,
     parseOutline, createOutlineTextbook, importOutlineToTextbook,
     setPrep, getPrep, updatePrep, cancelPrep, getCurrentWindow, setProgressWindow, advanceProgress,
-    getKpStatus, updateKpStatus,
+    getKpStatus, updateKpStatus, kpEvidenceSet, repairProgress,
     createCourse, appendDialogue, setSummary, saveCourse, getActiveCourse, clearActiveCourse, deleteCourse,
     addFlashcards, updateFlashcard, deleteFlashcard, toggleFlashcardFavorite, reviewFlashcard, dueByTextbook,
     getEmbeddings, setEmbeddings, setRagMode,

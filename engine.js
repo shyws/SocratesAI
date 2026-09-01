@@ -464,6 +464,11 @@ window.Engine = (function () {
       ? (s.learner.globalPersona || '')
       : ((tb && tb.personaOverride && tb.personaOverride.trim()) || (s.learner.globalPersona || ''));
     const progress = tb ? tb.progress : null;
+    // 当前窗口（本节课所在单元）先算出来，用于把"当前单元"从"已覆盖单元"护栏中排除。
+    // 背景：2.18 之后窗口会因薄弱点停留在本单元（巩固 weak），若护栏仍把本单元列入"已学过、
+    // 不要作为主推内容"，就会与 focusKPs「优先巩固薄弱点」直接冲突，导致薄弱点无法重讲。
+    const currentWindow = (course && course.currentWindow) || (tb ? Store.getCurrentWindow(tb) : null);
+    const winUnitIdx = (currentWindow && currentWindow.unitIndex != null) ? currentWindow.unitIndex : -1;
     // 把 coveredUnitIndices 映射为单元标题，传给 buildSystemPrompt 作为"已学清单"硬护栏。
     // 注意：浅克隆 progress，避免污染 tb.progress（防止模型看到"假"数据）。
     const progressForPrompt = progress && tb.prep && Array.isArray(tb.prep.units)
@@ -471,7 +476,9 @@ window.Engine = (function () {
           // 仅当教材含多个 unit 时才注入"已覆盖单元"护栏；单 unit 教材（如 SSD/BSP）若注入，
           // 会把它唯一的 unit 标成"已学"，与"聚焦下一未掌握 KP"冲突，反而限制教学。
           coveredUnitTitles: (tb.prep.units.length > 1 && (progress.coveredUnitIndices || []).length)
-            ? (progress.coveredUnitIndices || []).map((i) => tb.prep.units[i] && tb.prep.units[i].title).filter(Boolean)
+            ? (progress.coveredUnitIndices || [])
+              .filter((i) => i !== winUnitIdx) // 排除当前正在教学的单元（它含薄弱点，仍需巩固）
+              .map((i) => tb.prep.units[i] && tb.prep.units[i].title).filter(Boolean)
             : [],
         })
       : progress;
@@ -479,7 +486,6 @@ window.Engine = (function () {
     const focusKPs = computeFocusKPs(tb, 6);
     const tbHasImages = !!(tb && tb.hasImages);
     const isOutline = !!(tb && tb.mode === 'outline');
-    const currentWindow = (course && course.currentWindow) || (tb ? Store.getCurrentWindow(tb) : null);
     const allChunks = tb ? tb.chunks.map((c) => c.text) : [];
     let win = null;
     if (currentWindow && currentWindow.startChunk != null && currentWindow.endChunk != null) win = { start: currentWindow.startChunk, end: currentWindow.endChunk };
@@ -576,15 +582,30 @@ window.Engine = (function () {
     // 真正的根因修复见 public/llm.js：所有请求强制加 thinking:{type:"disabled"}。
     // 这里只做诊断提示，让用户能识别"代码没部署成功"vs"配置问题"。
     if (provider !== 'mock' && (!content || !String(content).trim())) {
+      // 主动探活：拉一次线上的 llm.js 看是否包含最新修复关键字。
+      // 如果包含 → 部署成功，问题在其他环节（baseURL / prompt 长度 / 内容过滤）；
+      // 如果不包含 → llm.js 还没上传新版本，本提示就解释了根因。
+      let llmDeployed = '未知';
+      try {
+        const r = await fetch('./llm.js?probe=' + Date.now(), { cache: 'no-store' });
+        const t = await r.text();
+        llmDeployed = t.includes("type: 'disabled'") || t.includes('type: "disabled"')
+          ? '✅ llm.js 已包含最新修复（thinking:disabled）'
+          : '❌ llm.js 还是旧版本（无 thinking:disabled），请重新上传';
+      } catch (e) {
+        llmDeployed = '⚠️ 无法读取 llm.js（' + (e.message || e) + '）';
+      }
       throw new Error(
         'AI 返回了 200 但 content 字段为空字符串（finish_reason 通常为 stop）。\n\n'
-        + '这是 DeepSeek V4 系列特有的"思考模式 + JSON 模式"冲突陷阱：模型把 token 烧在内部思考上，content 留空。\n'
-        + '修复方案：在请求体里加 "thinking": { "type": "disabled" }（Socratopia 最新版已在 public/llm.js 自动加）。\n\n'
-        + '如果 Socratopia 最新代码已部署、还看到这条，请按顺序排查：\n'
-        + '1)【最常见】浏览器跑的是 GitHub Pages 旧版本 → 确认已重新部署 + Ctrl+Shift+R 硬刷新\n'
-        + '2) 设置里的 baseURL 不是 DeepSeek 官方 https://api.deepseek.com/v1（第三方代理可能忽略 thinking 参数）→ 改回官方端点\n'
-        + '3) prompt 过长（你这次 prompt_tokens=' + (course.dialogues.length || 0) + '，实际由 usage.prompt_tokens 显示），缩短对话历史或减小输入\n'
-        + '4) 服务端触发内容安全过滤 → 换模型（v4-flash ↔ v4-pro）或调整 prompt\n\n'
+        + 'DeepSeek V4 系列"思考模式 + JSON 模式"冲突陷阱：模型把 token 烧在内部思考上，content 留空。\n'
+        + '修复方案：在请求体里加 "thinking": { "type": "disabled" }。\n\n'
+        + '【自动检测结果】' + llmDeployed + '\n\n'
+        + '如果上面是 ❌，请把本地 Socratopia-demo/public/llm.js 重新上传到 GitHub Pages，'
+        + '上传完按 Ctrl+Shift+R 硬刷新后再试。\n\n'
+        + '如果是 ✅，说明 llm.js 已生效，请继续排查：\n'
+        + '1) 设置里的 baseURL 不是 DeepSeek 官方 https://api.deepseek.com/v1（第三方代理可能忽略 thinking 参数）→ 改回官方端点\n'
+        + '2) prompt 过长（你这次 prompt_tokens=' + (course.dialogues.length || 0) + '，实际由 usage.prompt_tokens 显示），缩短对话历史或减小输入\n'
+        + '3) 服务端触发内容安全过滤 → 换模型（v4-flash ↔ v4-pro）或调整 prompt\n\n'
         + '参考：https://api-docs.deepseek.com/zh-cn/guides/thinking_mode'
       );
     }
@@ -719,6 +740,11 @@ window.Engine = (function () {
     return { flashcards: added, provider, targetCount };
   }
 
+  // 判断某知识点是否在"本次对话"中被真实讨论过（用于阻止"不论对话内容，每次下课都完成一个单元"）。
+  // 匹配策略（宽松，宁可放行也不误杀）：
+  //   ① 知识点标题整名出现在对话文本中；
+  //   ② 否则拆出核心词（英文/数字串、或 ≥2 字的中文串），命中过半即视为有证据。
+  // 返回有对话证据的 KP id 集合。
   async function endCourse(textbookId, courseId) {
     const s = Store._raw();
     const tb = s.textbooks.find((t) => t.id === textbookId);
@@ -745,16 +771,32 @@ window.Engine = (function () {
     if (summary && tb.prep && Array.isArray(tb.prep.knowledgePoints) && tb.prep.knowledgePoints.length) {
       const kpStatusUpdates = {};
       const kps = tb.prep.knowledgePoints;
+      // 【对话证据护栏】修复"不论对话内容，每次下课进度都直接完成一个单元"：
+      // 2.18 之后 weak 不再算完成，因此"单元完成"的唯一路径是该单元所有 KP 都变成 mastered。
+      // 只要要求 mastered 必须有对话证据，进度就不可能跑到实际教学内容前面。
+      // 证据来自本次课程的对话文本（模型容易照着"教材窗口"而非"对话"判断，故用确定性规则兜底）。
+      const dialogueText = (course.dialogues || []).map((d) => d.content || '').join('\n');
+      const evidence = Store.kpEvidenceSet(kps, dialogueText);
+      // 兜底：若一个都没匹配上（多为知识点标题被同义改写），则信任模型判断，避免进度永远卡死
+      const trustModel = evidence.size === 0;
+      const canMaster = (id) => trustModel || evidence.has(id);
       // 优先使用模型直接标注的 kpStatus（引用真实 KP id），比字符串包含匹配可靠得多
       if (summary.kpStatus && typeof summary.kpStatus === 'object') {
         Object.keys(summary.kpStatus).forEach((id) => {
           const st = summary.kpStatus[id];
-          if (st === 'mastered' || st === 'weak') kpStatusUpdates[id] = st;
+          // weak 不算完成（会让学员留在本单元巩固），直接放行
+          if (st === 'weak') { kpStatusUpdates[id] = st; return; }
+          if (st === 'mastered') {
+            // 无对话证据 → 降级为薄弱，而不是伪造"已掌握"让单元凭空完成
+            kpStatusUpdates[id] = canMaster(id) ? 'mastered' : 'weak';
+          }
         });
       }
       // 兜底：旧字符串包含匹配（兼容未输出 kpStatus 的历史/兜底总结）
       (summary.mastered || []).forEach((m) => {
-        kps.forEach((kp) => { if (kp.title.includes(m) || m.includes(kp.title)) kpStatusUpdates[kp.id] = 'mastered'; });
+        kps.forEach((kp) => {
+          if (kp.title.includes(m) || m.includes(kp.title)) kpStatusUpdates[kp.id] = canMaster(kp.id) ? 'mastered' : 'weak';
+        });
       });
       (summary.weak || []).forEach((w) => {
         kps.forEach((kp) => { if (kp.title.includes(w) || w.includes(kp.title)) kpStatusUpdates[kp.id] = 'weak'; });
